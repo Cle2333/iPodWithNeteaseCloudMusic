@@ -103,6 +103,8 @@ iTunesDB 的二进制格式和校验签名是真正的技术壁垒：
 ┌─────────▼───────────────┐   ┌─────────────────────┐
 │ 同步内核（src/ipod_cli/）│   │ api-enhanced        │
 └─────────┬───────────────┘   │ （Node，网易云 API） │
+          │                   │ ★ 也打进包里了       │
+          │                   │ 由后端拉起 + 看门狗  │
           │                   │ localhost:4000      │
 ┌─────────▼───────────────────┴─────────────────────┐
 │  iOpenPod 内核（src/iopenpod/）                    │
@@ -113,6 +115,12 @@ iTunesDB 的二进制格式和校验签名是真正的技术壁垒：
 │  iPod Classic（挂载为盘符，如 D:\）                │
 └───────────────────────────────────────────────────┘
 ```
+
+**为什么 node 也打进去了**：网易云 API 是个 Node 项目。只嵌 Python 的话，
+"下载"这一步仍要用户自己装 node、自己部署服务——一个"解压即用"的程序里
+嵌着两步手动准备说不通。所以 node 运行时和 API 一起进包，由后端启动，
+**并带看门狗**（父进程一没，node 2 秒内自退）——否则应用崩了 node 还占着
+4000 端口，下次启动撞端口，报错长得像"代码坏了"。
 
 **为什么 Python 是嵌进去的**：早期版本让界面起一个 `uv run ipod-web` 子进程，
 于是用户得先装 uv、首启要联网建 111 MB 的 venv、还要管"子进程杀没杀掉"。
@@ -140,15 +148,16 @@ iPod Classic 全代用 **HASH58** 签名，只需要设备 `SysInfo` 里的 Fire
 拿 `iPodWithNeteaseCloudMusic-v*-windows-x64.zip`，解压到任意位置，
 双击 `启动.bat`（或直接双击 `ipod_manager.exe`）。
 
-**不需要装 Python，不需要 uv，不需要联网初始化**——Python 运行时和后端代码
-都在包里（见上面的架构图）。只有「从网易云下载歌」需要你自己装
-[node](https://nodejs.org/)（它一百多兆，没打进包里）；没装 node 时其余功能照常可用。
+**不需要装任何东西**——Python 运行时、后端代码、**node 运行时和网易云 API**
+全都在包里（见上面的架构图）。**不需要联网初始化**，解压双击就能用。
 
 数据（登录态、下载记录、作业日程、歌曲缓存）在：
 
 ```
 %APPDATA%\com.example\ipod_manager\data\.ncm\
 ```
+
+后端日志也在它的 `logs/` 下（嵌入模式看不到控制台，出问题先看那个文件）。
 
 **从 v0.1.0 升级**：旧版把数据放在你运行命令的目录下的 `.ncm\` 里，新版不认那个
 位置。把旧 `.ncm\` 拷到上面这个路径即可，否则要重新扫码登录。
@@ -472,6 +481,7 @@ src/ipod_cli/     自写的设备侧代码
   remover.py       删除        verify.py     健康检查
   backup.py        备份/还原    transcode.py  ffmpeg 转码
   ncm/             网易云同步链路（client 接口 / sync 规划 / state 状态库）
+    server.py      拉起并收掉自带的网易云 API 子进程（含孤儿防护）
   sync_cli.py      网易云命令行入口
   cli.py           设备命令行入口
 src/ipod_web/     FastAPI 后端
@@ -479,14 +489,17 @@ src/ipod_web/     FastAPI 后端
   paths.py         数据目录推导与迁移（嵌入模式靠它保证"换启动方式不丢数据"）
 app/              Flutter 桌面端（Dart）
   python/main.py   嵌入模式的入口：serious_python 在独立线程里跑它
+  node/launcher.js 自带网易云 API 的启动器（关掉版本检查 + 父进程看门狗）
   lib/services/backend.dart
                    后端生命周期：嵌入（默认）/ 外挂（uv 子进程）两种模式
 tests/            pytest：跑在 tmp 目录的虚拟 iPod 上，不碰真机也不碰真网络
                   app/test/ 是桌面端的 widget 测试
 tools/            开发辅助脚本
   assemble_python_app.py     把 src/ 摆成嵌入要的平铺布局
-  build_windows_release.py   一键构建（组装 → 装依赖 → flutter build）
-  verify_embedded_release.py 发行版自检
+  bundle_node_api.py         打包 node 运行时 + 网易云 API（含许可）
+  build_windows_release.py   一键构建（组装 → 装依赖 → 打 node → flutter build）
+  verify_embedded_release.py 发行版自检（含孤儿进程检查）
+  verify_device_flow.py      设备端到端：读库 → 导入 → 读回 → 健康检查
   package_release.py         打发行 zip
   fix_plugin_symlinks.py     Windows 没开"开发者模式"时的构建绕行
   （另有：真机彩排、依赖分析、端口清理）

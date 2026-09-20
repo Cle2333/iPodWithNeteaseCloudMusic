@@ -57,26 +57,32 @@ uv run ipod-web --port 8765
 | --- | --- | --- |
 | **uv** | 跑后端与测试。**发行版不需要它**（Python 已嵌入 exe） | 本机已装 |
 | **Flutter** | 编译桌面端 | `C:\flutter` |
-| **Node.js** | 只为「从网易云下载」服务（见下） | 本机已装 |
+| **Node.js** | 只为「从网易云下载」服务；**发行版自带**，源码形态才需要本机装 | 本机已装 |
 | **iPod 真机** | 同步目标 | 挂载为 `D:\`，`iPod_Control/` 在根目录 |
 
-### ★ api-enhanced（网易云 API）—— 在仓库外！
+### ★ api-enhanced（网易云 API）—— 在仓库外，但**发行版自带**
 
-「从网易云下载」的整条链路都依赖它，但**它不在本仓库里**：
+「从网易云下载」的整条链路都依赖它，而**它不在本仓库里**：
 
 ```
-位置：C:\Users\ROG\source\repos\api-enhanced
+位置：C:\Users\ROG\source\repos\api-enhanced   （用 IPOD_MANAGER_API_ENHANCED 可指定别处）
 启动：node app.js          （它自己的 AGENTS.md 里也叫 pnpm start）
 端口：4000
 ```
 
-后端通过 `--base-url` 连它（默认 `localhost:4000`，见 `src/ipod_web/app.py:105`）。
+**发行版会把 node 运行时 + 它一起打进 `node_api/`**（见 `tools/bundle_node_api.py`），
+所以最终用户不需要装 node、也不需要部署这个服务。区别在于：
 
-* 没起它 → 界面显示「网易云服务不可用」，**下载 / 登录 / 歌单列表全部失效**。
-  这是**外部依赖没起**，不是代码坏了——先 `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4000` 确认。
+* **源码形态**跑（`uv run ipod-web`）—— 需要你自己起它，否则界面显示
+  「网易云服务不可用」，**下载 / 登录 / 歌单列表全部失效**。
+  这是**外部依赖没起**，不是代码坏了：先
+  `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4000` 确认。
+* **发行版**跑 —— 后端启动时自动拉起自带的那个（`src/ipod_cli/ncm/server.py`），
+  并带**看门狗**：应用一退，node 2 秒内自退（否则孤儿占着 4000 端口，
+  下次启动撞端口，报错长得像"代码坏了"）。
 * 本地音乐文件导进 iPod 的路径**不需要**它，没网也能用。
 * 它自己是个 Node/TypeScript 项目（pnpm），有自己的 `AGENTS.md`。
-  **不要把它搬进本仓库**，也不要假设它随本仓库一起 clone。
+  **不要把它搬进本仓库**；打包时按路径取，不进版本库。
 
 
 ## 动手前必读
@@ -141,7 +147,9 @@ site-packages 导致依赖错位——跑脚本一律 `env -u PYTHONPATH`。
 | **三个 `SERIOUS_PYTHON_*` 环境变量要覆盖两步** | `package` 和 `flutter build` 必须在**同一 shell**里都看得到，否则 site-packages / app 根本不进 bundle，而构建**照样"成功"** |
 | **换 Python 版本必须 `flutter clean`** | 不然 `Lib/` 里混着别的版本的 `.pyc`，症状是 `ImportError: bad magic number in 'string'`：应用能起、Python 全无反应 |
 | **Windows 没开"开发者模式"就构建不了** | Flutter 要给插件建**符号链接**，需要管理员或开发者模式。`tools/fix_plugin_symlinks.py` 用 junction（不需要权限）绕过，`build_windows_release.py` 已自动调用。注意 `flutter pub get` 本身就会因此返回非零 |
-| **MSYS 路径会毁掉 pip 安装** | `/c/Users/...` 交给 Windows 原生程序会被当成 `C:\c\...`，依赖装到不存在的路径而构建"成功"。一律用 `C:/` 形式（`pwd -W`） |
+| **MSYS 路径会毁掉 pip 安装** | `/c/Users/...` 交给 Windows 原生程序会被当成 `C:\c\...`，依赖装到不存在的路径而构建"成功"。一律用 `C:/` 形式（`pwd -W`）。**同一个 bug 类还会让 `node --check /c/...` 报"模块找不到"**（Hermes 的 lint 钩子踩过）——症状是"代码语法错了"，其实路径形式错了 |
+| **★ 拿应用做测试时 `Popen(stdout=PIPE)` 必须一边读** | 不读 → 管道填满 → 嵌入的 Python **阻塞在写日志上**，连作业线程一起卡住。症状是"作业一直排队、接口全超时"，极像应用坏了，实际是测试脚手架把它锁死了。`tools/verify_device_flow.py` 里的 `drain()` 就是干这个的 |
+| **node 的 LICENSE 要随包分发** | node 是 MIT，官方 zip 里带 LICENSE。只解压 `node.exe` 会漏掉它（最常见的分发合规疏漏）。`bundle_node_api.py` 一起提取成 `node_api/NODE-LICENSE`，且缓存命中时会校验它在不在——不校验的话加了补丁也会静默失效 |
 
 ## 认证与本地状态
 

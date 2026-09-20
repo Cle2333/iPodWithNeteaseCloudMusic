@@ -62,6 +62,19 @@ def db_and_cache(data_dir: Path) -> tuple[Path, Path]:
     return root / _DB_NAME, root / _CACHE
 
 
+def log_file(data_dir: Path) -> Path:
+    """嵌入模式的后端日志文件 → `<数据目录>/.ncm/logs/backend-YYYYMMDD.log`。
+
+    **为什么嵌入模式也要写文件**：命令行启动时后端日志就在终端里，一眼能看到；
+    嵌进去之后 stdout 只进界面的调试面板，而"事后排查"（尤其是应用已经关掉、
+    或者用户来报障）就没有东西可看了。写一份文件是这类黑箱程序的最低要求。
+    """
+    import datetime
+
+    today = datetime.date.today().strftime("%Y%m%d")
+    return data_dir / _NCM / "logs" / f"backend-{today}.log"
+
+
 def migrate_if_needed(target_db: Path, candidates: list[Path]) -> bool:
     """目标库不存在时，从候选位置**复制**一份过来。
 

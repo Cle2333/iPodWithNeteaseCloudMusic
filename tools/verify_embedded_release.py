@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -84,6 +85,10 @@ def main() -> int:
         check(f"bundle 里有 {name}/", (out_dir / name).is_dir())
     for pkg in ("ipod_web", "ipod_cli", "iopenpod"):
         check(f"app/ 里有 {pkg}/", (out_dir / "app" / pkg).is_dir())
+    # 自带的 node 运行时 + 网易云 API（「从网易云下载」的前提）
+    for rel in ("node_api/node.exe", "node_api/launcher.js", "node_api/api/app.js",
+                "node_api/api/node_modules"):
+        check(f"有 {rel}", (out_dir / rel).exists())
     dlls = sorted(p.name for p in out_dir.glob("python3*.dll"))
     # `python3.dll` 是稳定 ABI 的转发层，永远在；要盯的是**带版本号**的那个，
     # 出现两个版本号说明混了两次构建的产物（`.pyc` 版本不匹配的源头）
@@ -174,6 +179,32 @@ def main() -> int:
         print(f"        读库失败：{exc}")
         print("        （没插 iPod 的话这是正常的）")
 
+    print("══ 6. 自带的网易云 API（node）══")
+    # 后端会在启动时**后台**把它拉起来，所以这里要等一会儿
+    api_up = False
+    api_deadline = time.time() + 40
+    while time.time() < api_deadline:
+        try:
+            socket.create_connection(("127.0.0.1", 4000), timeout=1).close()
+            api_up = True
+            break
+        except OSError:
+            time.sleep(1)
+    check("自带的网易云 API 起来了（127.0.0.1:4000）", api_up,
+          "" if api_up else "没起来——看下面的应用输出，node 那边会打日志")
+
+    print("══ 7. 孤儿检查（看门狗）══")
+    # ★ 打包 node 之后最容易出的问题：应用退出了，node 还活着占着 4000 端口，
+    #   下次启动撞端口。launcher.js 的看门狗应该让它在 2 秒内自退。
+    #   这里**先把应用杀掉**，再等一会儿看 node 有没有跟着走。
+    if not args.keep:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True)
+        time.sleep(6)
+        survived = _node_processes(out_dir)
+        check("应用退出后没有残留 node 进程", not survived,
+              f"残留：{survived}" if survived else "")
+
     print()
     if FAILURES:
         print(f"❌ 有 {len(FAILURES)} 项没过：{FAILURES}")
@@ -182,11 +213,36 @@ def main() -> int:
 
     if args.keep:
         print(f"   进程留着（PID {proc.pid}），端口 {args.port}")
-    else:
-        print("   停掉进程…")
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       capture_output=True)
     return 1 if FAILURES else 0
+
+
+def _node_processes(bundle_dir: Path) -> list[str]:
+    """列出还在跑的、**来自本 bundle** 的 node 进程。
+
+    ★ 必须按可执行文件路径过滤。开发机上通常本来就有别的 node 在跑（编辑器插件、
+    别的工具），不过滤的话这个检查会永远失败——而"永远失败的检查"等于没有检查。
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | "
+             "Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=30, errors="replace",
+        ).stdout.strip()
+        if not out:
+            return []
+        data = json.loads(out)
+        if isinstance(data, dict):
+            data = [data]
+        ours = str(bundle_dir).lower()
+        return [
+            f"{d.get('ProcessId')}:{d.get('ExecutablePath')}"
+            for d in data
+            if str(d.get("ExecutablePath") or "").lower().startswith(ours)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        print(f"        （查进程失败：{exc}）")
+        return []
 
 
 if __name__ == "__main__":

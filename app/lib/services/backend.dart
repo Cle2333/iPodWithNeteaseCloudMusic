@@ -73,6 +73,9 @@ const String kExternalBackendEnv = 'IPOD_MANAGER_EXTERNAL_BACKEND';
 /// 传给嵌入 Python 的环境变量名，跟 `app/python/main.py` 里的常量对齐。
 const String _kPortEnv = 'IPOD_MANAGER_PORT';
 const String _kDataDirEnv = 'IPOD_MANAGER_DATA_DIR';
+/// bundle 目录（exe 所在目录）。Python 侧靠它找到自带的 node + 网易云 API——
+/// **不能让它用 `sys.executable` 推**：嵌入环境里那是打包机的路径。
+const String _kBundleDirEnv = 'IPOD_MANAGER_BUNDLE_DIR';
 
 class BackendService extends ChangeNotifier {
   BackendService({required this.port, BackendMode? mode})
@@ -205,11 +208,17 @@ class BackendService extends ChangeNotifier {
     _log('[启动器] 模式：嵌入（Python 跑在本进程内）');
     _log('[启动器] 数据目录：$dataDir');
 
+    // exe 所在目录 = bundle 根。自带的东西（node 运行时、网易云 API）都在它下面。
+    // 由**这边**算好传下去，别让 Python 猜。
+    final bundleDir = File(Platform.resolvedExecutable).parent.path;
+    _log('[启动器] bundle 目录：$bundleDir');
+
     try {
       final error = await SeriousPython.run(
         environmentVariables: <String, String>{
           _kPortEnv: '$port',
           _kDataDirEnv: dataDir,
+          _kBundleDirEnv: bundleDir,
         },
       );
       // 返回非空表示 Python 那边报错了。**必须说出来**——否则表现只是

@@ -50,40 +50,17 @@ REQUIRED = ("ipod_manager.exe", "Lib", "site-packages", "app", "DLLs", "data")
 
 
 def launcher_bat() -> str:
-    """启动器。内容保持短——它只干两件事：看 node 在不在、启动应用。"""
+    """启动器。
+
+    内容故意保持很短：**所有运行环境（Python、node、网易云 API）都在包里**，
+    所以没有"检查依赖"这一步可做——检查不存在的依赖比不检查更糟，用户会以为
+    装漏了。剩下的只有"用 start 脱离本窗口启动"这一件事。
+    """
     return """@echo off
 chcp 936 >nul
 title iPod 音乐管理器
 cd /d "%~dp0"
 
-echo.
-echo   iPod 音乐管理器
-echo   ==========================================================
-echo.
-
-rem ── 只有"从网易云下载"需要 node ───────────────────────────
-rem 后端（Python）已经打包在本程序里，不需要装 uv，也不需要联网装依赖。
-where node >nul 2>&1
-if errorlevel 1 goto NO_NODE
-echo   [√] node 已就绪（从网易云下载需要它）
-goto START
-
-:NO_NODE
-echo   [!] 没找到 node。
-echo.
-echo       不影响：把本地音乐导进 iPod、管理 iPod 上的歌、备份、
-echo               删除、校验——这些都不需要 node。
-echo       影响：  "从网易云下载歌"需要 node 跑 api-enhanced 那个本地 API。
-echo.
-echo       装了 node 之后重新双击本文件即可：https://nodejs.org/
-echo.
-echo       按任意键继续启动……
-pause >nul
-
-:START
-echo.
-echo   正在启动……
-echo.
 rem 用 start 脱离本窗口，这样关掉黑窗口不会把应用一起关掉
 start "" "ipod_manager.exe"
 exit /b 0
@@ -107,24 +84,25 @@ def readme_txt(version: str) -> str:
 3. 插上 iPod，等它出现在「此电脑」里
 4. 到「歌单」页挑歌 → 下载 → 同步到 iPod
 
-程序自带 Python 运行时，**不需要**你再装 Python 或 uv，
+程序自带运行环境，**不需要**你再装 Python、node 或 uv，
 也不需要联网初始化。
-
-关于 node
-------------------------------------------------------------
-「从网易云下载歌」这个功能需要一个叫 node 的运行时来跑网易云接口，
-本包没带（它有一百多兆）。没装 node 时，其余功能照常可用。
-下载地址：https://nodejs.org/
 
 ============================================================
 数据存在哪
 ============================================================
-登录状态、下载记录、作业日程都在：
+登录状态、下载记录、作业日程、歌曲缓存都在：
 
     %APPDATA%\\com.example\\ipod_manager\\data\\.ncm\\
 
-下面是下载的歌曲缓存。备份这个 data 目录就等于备份全部状态。
+备份这个 data 目录就等于备份全部状态。
 （iPod 上的歌和这个无关，那是直接写进 iPod 的。）
+
+出问题时的日志也在这里：
+
+    %APPDATA%\\com.example\\ipod_manager\\data\\.ncm\\logs\\backend-<日期>.log
+
+程序内置的网易云服务（藏在 node_api\\ 目录里）会在启动后自动跑起来，
+你不需要管它；程序退出时它会跟着退出。
 
 从旧版本升级
 ------------------------------------------------------------
@@ -144,7 +122,8 @@ def readme_txt(version: str) -> str:
 
 许可
 ------------------------------------------------------------
-MIT。详见 LICENSE 与 THIRD_PARTY_NOTICES.md（含 iOpenPod 的 MIT 许可）。
+MIT。详见 LICENSE 与 THIRD_PARTY_NOTICES.md（含 iOpenPod 的 MIT 许可、
+api-enhanced 与 node 的许可）。
 """
 
 

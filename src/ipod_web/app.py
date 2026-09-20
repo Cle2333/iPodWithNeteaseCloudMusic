@@ -49,6 +49,12 @@ def create_app(ctx: WebContext | None = None) -> FastAPI:
         yield
         # 退出时把作业队列收干净（正在跑的作业会被请求取消）
         context.shutdown()
+        # 以及我们自己拉起来的网易云 API 子进程。
+        # 看门狗（node 侧）是主防线——父进程没了它 2 秒内自退；这里是正常退出时的
+        # 优雅路径，让端口立刻释放，下一次启动不用等。
+        from ipod_cli.ncm import server as ncm_server
+
+        ncm_server.stop()
 
     app = FastAPI(
         title="iPod 音乐管理器",
@@ -236,6 +242,15 @@ def serve(
     print(f"  状态库   {ctx.store.path}", flush=True)
     print(f"  网易云   {ctx.base_url}", flush=True)
     print(f"  设备     {ipod or '自动检测'}", flush=True)
+
+    # 自带网易云 API 时**后台**把它拉起来。
+    #
+    # 后台的理由：它是「从网易云下载」的前提，不是应用可用的前提。串在这里等
+    # 会让启动慢 2–5 秒，而界面本来就能先把"设备/音乐库"这些不依赖它的页面画出来。
+    # 拉起失败也不报错——界面会显示「网易云服务不可用」，那才是正确的可见状态。
+    from ipod_cli.ncm import server as ncm_server
+
+    ncm_server.ensure_async(ctx.base_url, None)
 
     import uvicorn
 

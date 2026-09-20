@@ -178,11 +178,32 @@ def main() -> int:
         cwd=APP,
     )
 
-    print("══ ⑤ 构建（原生阶段会把 site-packages 和 app 拷进 bundle）══")
+    print("══ ⑤ 打包 node 运行时 + 网易云 API ══")
+    # 自制的话这一步会下载 node（首次约 77 MB，之后走缓存）。放这里是因为它
+    # 跟 flutter 无关，且失败要**早失败**——别等到构建完 90 秒才发现缺东西。
+    _run([sys.executable, str(ROOT / "tools" / "bundle_node_api.py")], env=env)
+
+    print("══ ⑥ 构建（原生阶段会把 site-packages 和 app 拷进 bundle）══")
     _flutter(["build", "windows", "--debug" if args.debug else "--release"], env)
 
     mode = "Debug" if args.debug else "Release"
     out = APP / "build" / "windows" / "x64" / "runner" / mode
+
+    print("══ ⑦ 把 node_api/ 放到 exe 同级 ══")
+    # ★ 这一步**必须自己拷**：serious_python 的原生构建只会拷它自己的东西，
+    #   不会管我们的 node_api/。漏了它的症状是"网易云服务不可用"，
+    #   而界面上完全看不出是缺文件。
+    node_src = APP / "build" / "node_api"
+    node_dst = out / "node_api"
+    if not node_src.is_dir():
+        raise SystemExit(f"缺 {node_src}——第 ⑤ 步没成功？")
+    if node_dst.exists():
+        shutil.rmtree(node_dst)
+    shutil.copytree(node_src, node_dst)
+    node_mb = sum(f.stat().st_size for f in node_dst.rglob("*")
+                  if f.is_file()) / 1024 / 1024
+    print(f"   node_api/ → {node_dst}（{node_mb:.1f} MB）")
+
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file()) if out.is_dir() else 0
 
     print()

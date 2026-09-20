@@ -41,6 +41,9 @@ from pathlib import Path
 PORT_ENV = "IPOD_MANAGER_PORT"
 #: 宿主传的数据目录（**嵌入模式的必需项**，见模块开头第 2 条）
 DATA_DIR_ENV = "IPOD_MANAGER_DATA_DIR"
+#: 显式指定 iPod 挂载点（可选，默认自动检测）。
+#: 两个用处：真机没插时指向彩排目录做端到端验证；多台设备时锁定目标。
+IPOD_ENV = "IPOD_MANAGER_IPOD"
 
 #: 靠这个包反查自身目录——它是我们自己写的，一定跟着 main.py 一起被打包
 _MARKER_PACKAGE = "ipod_web"
@@ -94,14 +97,24 @@ def main() -> int:
     port = int(os.environ.get(PORT_ENV) or 8765)
     raw_dir = (os.environ.get(DATA_DIR_ENV) or "").strip()
     data_dir = Path(raw_dir).expanduser() if raw_dir else None
+    ipod = (os.environ.get(IPOD_ENV) or "").strip() or None
 
     print(f"嵌入模式启动：app 目录 {here or '（没找到，靠 sys.path）'}", flush=True)
     print(f"  端口     {port}", flush=True)
     print(f"  数据目录 {data_dir or '（未指定，退回当前目录）'}", flush=True)
+    print(f"  设备     {ipod or '自动检测'}", flush=True)
 
+    from ipod_web import paths
     from ipod_web.app import serve
 
-    serve(port=port, data_dir=data_dir)
+    # 嵌入模式也要写日志文件：stdout 只进界面调试面板，事后（尤其是应用关了
+    # 之后）就没东西可查了。见 paths.log_file 的说明。
+    log_path = paths.log_file(data_dir) if data_dir is not None else None
+    if log_path is not None:
+        print(f"  日志     {log_path}", flush=True)
+
+    serve(port=port, data_dir=data_dir, ipod=ipod,
+          log_file=str(log_path) if log_path else None)
     return 0
 
 
