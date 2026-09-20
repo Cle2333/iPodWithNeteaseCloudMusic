@@ -56,7 +56,7 @@ iTunesDB 的二进制格式和校验签名是真正的技术壁垒：
 * **落盘**：Windows 往 FAT32 写要 `FlushFileBuffers` 刷卷，不刷就拔线会丢数据。
 
 这些重写一遍风险极高、收益为零，所以 `src/iopenpod/` 直接**裁剪复用** iOpenPod
-（MIT）的对应模块——上游 265 文件 / 14 万行里，只留下这个项目真正需要的
+（MIT）的对应模块——上游 fork 点是 265 文件 / 14 万行，只留下这个项目真正需要的
 约 2.8 万行，并且**几乎不改动**（改动只在 `device/__init__.py` 的导出面）。
 
 自己写的是**它上面的一层**：设备识别、读库、导入/导出/删除、备份还原、健康检查，
@@ -421,9 +421,10 @@ uv run ruff check src/ipod_cli tests tools
 ## 目录结构
 
 ```
-src/iopenpod/     裁剪自 iOpenPod 的内核（104 文件 / 27,979 行，几乎原样搬运）
-                   iTunesDB / ArtworkDB 读写 + HASH58 签名 + FAT32 安全写入
-src/ipod_cli/     自写的设备侧代码（19 文件 / 7,329 行）
+src/iopenpod/     裁剪自 iOpenPod 的内核（几乎原样搬运）
+                  iTunesDB / ArtworkDB 读写 + HASH58 签名 + FAT32 安全写入
+                  ★ 不要改这里——要改先读 THIRD_PARTY_NOTICES.md
+src/ipod_cli/     自写的设备侧代码
   discovery.py     设备识别（纯文件系统，不走 USB 硬件探测）
   library.py       读库
   dbwrite.py       写入核心：整库重写 + 重建播放列表 + 签名 + 读回校验
@@ -433,16 +434,18 @@ src/ipod_cli/     自写的设备侧代码（19 文件 / 7,329 行）
   ncm/             网易云同步链路（client 接口 / sync 规划 / state 状态库）
   sync_cli.py      网易云命令行入口
   cli.py           设备命令行入口
-src/ipod_web/     FastAPI 后端（15 文件 / 3,660 行）
+src/ipod_web/     FastAPI 后端
                   路由 + 全局单线程作业队列 + 缓存，给桌面端用
-app/              Flutter 桌面端（20 文件 / 7,598 行 Dart）
-tests/            pytest 555 项（25 文件 / 9,042 行）
-                  app/test/ 另有 Flutter 71 项
+app/              Flutter 桌面端（Dart）
+tests/            pytest：跑在 tmp 目录的虚拟 iPod 上，不碰真机也不碰真网络
+                  app/test/ 是桌面端的 widget 测试
 tools/            开发辅助脚本：真机彩排、依赖分析、端口清理
 docs/             技术文档
+release/          发行版打包流程与启动器
 ```
 
-自己写的部分：Python 约 11,000 行 + Dart 约 7,600 行 + 测试约 11,400 行。
+**这里故意不写文件数、行数、测试条数**——它们每次提交都会漂，写在文档里只会
+变成谎话。想知道现状：仓库页面有语言统计，本地跑 `uv run pytest tests/ -q` 看实际结果。
 
 ## 引用的项目
 

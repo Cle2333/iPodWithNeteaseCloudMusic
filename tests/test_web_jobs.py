@@ -743,15 +743,89 @@ class TestEntrypointWiring:
     真实入口却一条记录都没落盘——只有跑起来看才发现。
     """
 
-    def test_cli_entry_wires_history_beside_the_db(self, tmp_path: Path) -> None:
-        from ipod_web.app import build_context, build_parser
+    def test_cli_entry_wires_history_beside_the_db(self, tmp_path: Path,
+                                                   monkeypatch) -> None:
+        """`main()` 解析出来的参数，必须**一路传到**建上下文那一步。
+
+        这里不直接调 ``build_context`` 就完事——那只证明"函数本身没问题"，
+        证明不了"入口把值传对了"。实测踩过：`WebContext` 里接得好好的线，
+        被入口自己传的裸 `JobManager()` 整个绕过去，单元测试全绿、真实入口
+        一条记录都不落盘。
+
+        所以用 monkeypatch 把阻塞的 ``serve`` 换成捕获器，走**真实的
+        ``main()``**，既验参数传递、又不用真起 uvicorn。
+        """
+        from ipod_web import app as web_app
 
         db = tmp_path / "ncm.db"
-        args = build_parser().parse_args(["--db", str(db)])
-        ctx = build_context(args)
+        captured: dict = {}
 
+        def fake_serve(**kw):
+            captured.update(kw)
+            return 0
+
+        monkeypatch.setattr(web_app, "serve", fake_serve)
+
+        assert web_app.main(["--db", str(db)]) == 0
+        assert captured["db"] == str(db), "入口没把 --db 传下去"
+
+        # `serve` 还收 port/log_file 这些，但建上下文用不到——只取它认的那几个
+        ctx_kwargs = {
+            k: v for k, v in captured.items()
+            if k in {"db", "base_url", "ipod", "cache_dir", "data_dir"}
+        }
+        ctx = web_app.build_context(**ctx_kwargs)
         assert ctx.store.path == db
         assert ctx.jobs.history_path == tmp_path / "logs" / "jobs.jsonl", (
             "启动路径没把日程接到盘上——重启就丢，导出等于没有"
         )
+        ctx.shutdown()
+
+    def test_cli_entry_passes_data_dir_and_env_falls_back(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """数据目录：``--data-dir`` 参数优先，没传时读环境变量。
+
+        嵌入模式全靠这条链路——宿主只给一个数据目录，状态库和缓存都要
+        从它推导出来。传丢了就是"用户登录态凭空消失"。
+        """
+        from ipod_web import app as web_app
+        from ipod_web.paths import DATA_DIR_ENV
+
+        # ① 显式参数优先（环境变量也在，但不该被用）
+        monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path / "来自环境变量"))
+        captured: dict = {}
+        monkeypatch.setattr(web_app, "serve", lambda **kw: captured.update(kw))
+        web_app.main(["--data-dir", str(tmp_path / "来自参数")])
+        assert captured["data_dir"] == tmp_path / "来自参数"
+
+        # ② 没传参数 → 用环境变量
+        captured.clear()
+        web_app.main([])
+        assert captured["data_dir"] == tmp_path / "来自环境变量"
+
+        # ③ 两者都没有 → None（退回相对 cwd 的老行为）
+        monkeypatch.delenv(DATA_DIR_ENV)
+        captured.clear()
+        web_app.main([])
+        assert captured["data_dir"] is None
+
+    def test_embedded_entry_derives_db_and_cache_from_data_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """嵌入模式：只给数据目录，状态库和缓存都得落在它下面。
+
+        以前这两条都是相对 cwd 推的。cwd 在嵌入环境里不可靠（宿主那句
+        `Directory.current = ...` 实测不生效），所以必须由数据目录显式推导。
+        """
+        from ipod_web.app import build_context
+        from ipod_web.paths import db_and_cache
+
+        data_dir = tmp_path / "应用支持目录"
+        ctx = build_context(data_dir=data_dir)
+
+        want_db, want_cache = db_and_cache(data_dir)
+        assert ctx.store.path == want_db
+        assert ctx.cache_dir == want_cache
+        assert ctx.store.path.parent.parent == data_dir, "状态库没落在数据目录下"
         ctx.shutdown()

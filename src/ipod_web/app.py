@@ -19,6 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from ipod_web import paths
 from ipod_web.context import WebContext
 from ipod_web.routes import (
     account,
@@ -107,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="下载缓存目录")
     parser.add_argument("--db", default=None, metavar="文件",
                         help="状态库路径（默认 .ncm/ncm.db）")
+    parser.add_argument("--data-dir", default=None, metavar="目录",
+                        help="运行时数据目录（状态库/缓存/日志都在它下面）。"
+                             f"命令行不传时读环境变量 {paths.DATA_DIR_ENV}；"
+                             "两者都没有就按老规矩用相对当前目录的 .ncm/")
     parser.add_argument("--log-file", default=None, metavar="文件",
                         help="把日志同时写到这里（调试面板显示的是同一份）")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -156,8 +161,22 @@ def _setup_logging(verbose: bool, log_file: str | None) -> None:
         logging.getLogger(name).propagate = True
 
 
-def build_context(args) -> WebContext:
-    """从命令行参数建运行时上下文。
+def build_context(
+    *,
+    db: str | None = None,
+    base_url: str | None = None,
+    ipod: str | None = None,
+    cache_dir: str | None = None,
+    data_dir: Path | None = None,
+) -> WebContext:
+    """建运行时上下文。
+
+    参数**显式列出**，不接 argparse 的 Namespace：命令行和嵌入模式（宿主直接
+    调用）都要用这一个函数，接 Namespace 会逼着嵌入那侧伪造一个假对象。
+
+    ``data_dir`` 是**嵌入模式**用的：宿主（Flutter）解析好应用支持目录传进来，
+    状态库/缓存就从它推导。为 ``None`` 时行为跟以前一字不差（相对 cwd 的
+    ``.ncm/``），所以命令行用法不受影响。推导与迁移的细节见 ``paths.py``。
 
     **别在这里传 ``jobs=``**：作业日程的落盘位置是跟着状态库走的
     （``<库目录>/logs/jobs.jsonl``），交给 ``WebContext`` 自己接线。
@@ -168,39 +187,85 @@ def build_context(args) -> WebContext:
     from ipod_cli.ncm.client import DEFAULT_BASE_URL
     from ipod_cli.ncm.state import StateStore
 
+    if data_dir is not None:
+        want_db, want_cache = paths.db_and_cache(data_dir)
+        # 用户以前在哪跑过命令，`.ncm/` 就在哪。找不到就重新登录，不阻塞启动。
+        paths.migrate_if_needed(want_db, paths.migration_candidates(data_dir))
+        db = db or str(want_db)
+        cache_dir = cache_dir or str(want_cache)
+
     return WebContext(
-        store=StateStore(args.db) if args.db else StateStore(),
-        base_url=args.base_url or DEFAULT_BASE_URL,
-        ipod_path=args.ipod,
-        cache_dir=args.cache_dir,
+        store=StateStore(db) if db else StateStore(),
+        base_url=base_url or DEFAULT_BASE_URL,
+        ipod_path=ipod,
+        cache_dir=cache_dir,
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    _setup_logging(args.verbose, args.log_file)
+def serve(
+    *,
+    port: int = DEFAULT_PORT,
+    data_dir: Path | None = None,
+    ipod: str | None = None,
+    base_url: str | None = None,
+    cache_dir: str | None = None,
+    db: str | None = None,
+    log_file: str | None = None,
+    verbose: bool = False,
+) -> int:
+    """起服务（**阻塞**，直到进程被停）。
 
-    ctx = build_context(args)
+    命令行 ``ipod-web`` 和**嵌入模式**共用这一份实现——宿主（Flutter）把
+    应用支持目录直接传成 ``data_dir``，这个函数在独立线程里跑，靠 uvicorn 的
+    阻塞撑住那条线程。两份实现一定会漂移，所以只留一份。
+
+    ``serve`` 只收**最终值**，自己不解析命令行：参数来源（argv / 环境变量 /
+    宿主传参）由各自的入口负责归一，这里不再猜。
+    """
+    _setup_logging(verbose, log_file)
+    ctx = build_context(
+        db=db,
+        base_url=base_url,
+        ipod=ipod,
+        cache_dir=cache_dir,
+        data_dir=data_dir,
+    )
 
     app = create_app(ctx)
-    address = f"http://{HOST}:{args.port}"
-    print(f"iPod 音乐管理器后端已启动：{address}")
-    print(f"  状态库   {ctx.store.path}")
-    print(f"  网易云   {ctx.base_url}")
-    print(f"  设备     {args.ipod or '自动检测'}")
-    print()
-    print("按 Ctrl+C 停止。")
+    print(f"iPod 音乐管理器后端已启动：http://{HOST}:{port}", flush=True)
+    print(f"  状态库   {ctx.store.path}", flush=True)
+    print(f"  网易云   {ctx.base_url}", flush=True)
+    print(f"  设备     {ipod or '自动检测'}", flush=True)
 
     import uvicorn
 
     uvicorn.run(
         app,
         host=HOST,          # ← 写死回环，不给配置项
-        port=args.port,
+        port=port,
         log_level="warning",   # uvicorn 自己的访问日志太吵，关到 warning
         access_log=False,
     )
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """命令行入口。"""
+    args = build_parser().parse_args(argv)
+
+    # 数据目录三级优先：--data-dir 参数 > 环境变量 > 不用（相对 cwd 的老行为）
+    data_dir = Path(args.data_dir) if args.data_dir else paths.data_dir_from_env()
+
+    return serve(
+        port=args.port,
+        data_dir=data_dir,
+        ipod=args.ipod,
+        base_url=args.base_url,
+        cache_dir=args.cache_dir,
+        db=args.db,
+        log_file=args.log_file,
+        verbose=args.verbose,
+    )
 
 
 if __name__ == "__main__":
