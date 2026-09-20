@@ -91,7 +91,7 @@ site-packages 导致依赖错位——跑脚本一律 `env -u PYTHONPATH`。
 
 | 坑 | 说明 |
 | --- | --- |
-| **行尾符** | 仓库统一 LF（`.gitattributes` 管着）。别手工改行尾，也别删这个文件——它治的正是"改两行、diff 报上千行"的老毛病 |
+| **行尾符分两组** | `.gitattributes` 管着，且**故意分两组**：`*.py *.dart *.md *.toml *.yaml *.json *.sh *.txt` 等是 **LF**；`*.cpp *.h *.rc *.manifest *.vcxproj *.sln *.bat *.ps1` 这些 Windows 原生文件是 **CRLF**。别一刀切、别手工改、别删这个文件——它治的正是"改两行、diff 报上千行"的老毛病 |
 | **改文件前先读一遍** | 别直接整文件覆盖（不同编辑器/工具写的行尾可能不同）。改完用 `git diff --numstat` 看删除行数是否合理——「append 任务却出现大量 deletions」= 被截断了 |
 | **设备要注册给内核** | 路由层拿到设备后必须 `device.activate()`（写 ArtworkDB 需要格式定义），`WebContext.device()` 里统一做了 |
 | **同一份数据两条读取路径** | 改一处必然漏另一处。改动后**两条路都要验**，且要覆盖用户实际看的那条 |
