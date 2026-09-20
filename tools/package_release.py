@@ -218,13 +218,13 @@ def main() -> int:
                 files += 1
 
     print()
-    print(f"✅ 完成")
+    print("✅ 完成")
     print(f"   目录 {dest}")
     print(f"   zip  {zip_path}  {zip_path.stat().st_size / 1024 / 1024:.1f} MB  {files} 个文件")
     print()
     print("   下一步（**别跳过**）：")
-    print(f"     1. 解压 zip 到**别的路径**，双击 启动.bat 试一次")
-    print(f"     2. uv run python tools/verify_embedded_release.py --exe <解压路径>/ipod_manager.exe")
+    print("     1. 解压 zip 到**别的路径**，双击 启动.bat 试一次")
+    print("     2. uv run python tools/verify_embedded_release.py --exe <解压路径>/ipod_manager.exe")
     return 0
 
 

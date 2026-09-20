@@ -122,7 +122,7 @@ def main() -> int:
     print("══ 2. 后端就绪 ══")
     check("进程还活着（没闪退）", proc.poll() is None,
           f"退出码 {proc.returncode}" if proc.poll() is not None else "")
-    check(f"/api/status 返回 200", status == 200, f"实际 {status}")
+    check("/api/status 返回 200", status == 200, f"实际 {status}")
 
     if proc.poll() is not None or status != 200:
         # 失败时把进程输出倒出来——嵌入模式的问题全藏在里面
