@@ -75,3 +75,62 @@ class TestUpsert:
         for _ in range(5):
             current = _upsert_playlists(current, [FakePlaylist("我喜欢的音乐", [1, 2])])
         assert len(current) == 1
+
+
+class TestPlaylistIdentityIsPreserved:
+    """★ 回归：同名替换时必须**继承旧的 playlist_id**。
+
+    写入器在 `playlist_id is None` 时生成一个新的。不继承的话"改一次成员 =
+    换一个身份"：
+
+    * 界面上刚拿到的 id 立刻失效（加完歌再读这个歌单 → 404，实测踩到）
+    * 同步每跑一次，同名播放列表就换一个 id，设备上按 id 引用它的东西
+      （On-The-Go 等）就断了——静默的数据完整性问题
+
+    这里用真的 `PlaylistInfo`，因为要验的正是写入器那个类型的字段。
+    """
+
+    def test_id_is_inherited_when_replacing_same_name(self) -> None:
+        from iopenpod.itunesdb_writer import PlaylistInfo
+
+        existing = [PlaylistInfo(name="我喜欢的音乐", track_ids=[1], playlist_id=777)]
+        incoming = [PlaylistInfo(name="我喜欢的音乐", track_ids=[2, 3])]
+
+        merged = _upsert_playlists(existing, incoming)
+
+        assert len(merged) == 1
+        assert merged[0].playlist_id == 777, "同名替换丢了身份"
+        assert merged[0].track_ids == [2, 3], "成员没更新"
+
+    def test_brand_new_playlist_has_no_id(self) -> None:
+        from iopenpod.itunesdb_writer import PlaylistInfo
+
+        merged = _upsert_playlists([], [PlaylistInfo(name="新歌单", track_ids=[1])])
+
+        assert merged[0].playlist_id is None, "新歌单该让写入器自己生成 id"
+
+    def test_explicit_id_is_respected(self) -> None:
+        """调用方自己指定了 id 就别覆盖——那是它有意为之。"""
+        from iopenpod.itunesdb_writer import PlaylistInfo
+
+        existing = [PlaylistInfo(name="甲", track_ids=[1], playlist_id=111)]
+        incoming = [PlaylistInfo(name="甲", track_ids=[2], playlist_id=999)]
+
+        merged = _upsert_playlists(existing, incoming)
+
+        assert merged[0].playlist_id == 999
+
+    def test_other_playlists_are_untouched(self) -> None:
+        from iopenpod.itunesdb_writer import PlaylistInfo
+
+        existing = [
+            PlaylistInfo(name="别的", track_ids=[9], playlist_id=42),
+            PlaylistInfo(name="要改的", track_ids=[1], playlist_id=77),
+        ]
+        incoming = [PlaylistInfo(name="要改的", track_ids=[1, 2])]
+
+        merged = _upsert_playlists(existing, incoming)
+
+        by_name = {p.name: p for p in merged}
+        assert by_name["别的"].playlist_id == 42
+        assert by_name["要改的"].playlist_id == 77

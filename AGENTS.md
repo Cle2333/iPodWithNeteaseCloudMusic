@@ -65,7 +65,7 @@ uv run ipod-web --port 8765
 「从网易云下载」的整条链路都依赖它，而**它不在本仓库里**：
 
 ```
-位置：C:\Users\ROG\source\repos\api-enhanced   （用 IPOD_MANAGER_API_ENHANCED 可指定别处）
+位置：跟本仓库同级的 api-enhanced/   （用 IPOD_MANAGER_API_ENHANCED 可指定别处）
 启动：node app.js          （它自己的 AGENTS.md 里也叫 pnpm start）
 端口：4000
 ```

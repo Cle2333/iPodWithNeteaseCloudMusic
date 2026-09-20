@@ -62,6 +62,23 @@ class _LibraryPageState extends State<LibraryPage> {
 
   ApiClient get _api => context.read<AppState>().api;
 
+  // ── 歌单（iPod **设备上**的播放列表）─────────────────────────────
+  //
+  // 这些都是设备上的结构，跟「歌单」页那些网易云在线歌单没有关系。
+  // 写操作全部走后端作业队列，完成后 refreshSignal 会触发重刷。
+
+  /// 顶部视图模式：false = 全部歌曲，true = 歌单。
+  bool _playlistMode = false;
+
+  IpodPlaylistList? _playlists;
+
+  /// 当前选中的歌单（`null` 表示还没选/设备上没有歌单）。
+  IpodPlaylist? _current;
+
+  IpodPlaylistTracks? _playlistTracks;
+  bool _plLoading = false;
+  String? _plError;
+
   @override
   void initState() {
     super.initState();
@@ -80,7 +97,11 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   void _onJobFinished() {
-    if (mounted) unawaited(_load());
+    if (!mounted) return;
+    unawaited(_load());
+    // 歌单的写操作也走作业队列（新建/改名/删除/增删成员），
+    // 完成后同样要重刷——不然界面上还是改动前的样子。
+    if (_playlistMode) unawaited(_loadPlaylists());
   }
 
   Future<void> _load({int? page}) async {
@@ -495,6 +516,302 @@ class _LibraryPageState extends State<LibraryPage> {
     );
   }
 
+  // ── 歌单操作 ──────────────────────────────────────────────────────
+
+  /// 只把歌单列表读回来，**不动当前选中项、不清勾选**。
+  ///
+  /// 「全部歌曲」模式下点「加入歌单」也要用到这份列表。那里不能调
+  /// `_loadPlaylists`——它会顺带切换选中歌单并清空勾选，等于把用户
+  /// 刚勾好的选择抹掉。实测踩到过：不读列表就直接报
+  /// "设备上还没有可编辑的歌单"（明明是有的）。
+  Future<void> _fetchPlaylistList() async {
+    final list = await _api.ipodPlaylists();
+    if (!mounted) return;
+    setState(() => _playlists = list);
+  }
+
+  Future<void> _loadPlaylists({String? selectId}) async {
+    setState(() {
+      _plLoading = true;
+      _plError = null;
+    });
+    try {
+      await _fetchPlaylistList();
+      final list = _playlists!;
+      if (!mounted) return;
+
+      // 选中项：优先保住当前选的那个（改完名/加完歌之后要停在原地），
+      // 它没了再退回"最后一个可编辑的"，都没有就不选。
+      final wanted = selectId ?? _current?.playlistId;
+      IpodPlaylist? pick;
+      for (final item in list.playlists) {
+        if (item.playlistId == wanted) {
+          pick = item;
+          break;
+        }
+      }
+      if (pick == null) {
+        for (final item in list.playlists) {
+          if (item.playlistId == selectId) pick = item;
+        }
+      }
+      if (pick == null) {
+        for (final item in list.playlists) {
+          if (item.editable) pick = item;
+        }
+      }
+      if (pick != null) {
+        await _selectPlaylist(pick);
+      } else {
+        setState(() {
+          _current = null;
+          _playlistTracks = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _plError = e.toString());
+    } finally {
+      if (mounted) setState(() => _plLoading = false);
+    }
+  }
+
+  Future<void> _selectPlaylist(IpodPlaylist item) async {
+    // ★ 切歌单时**必须清空勾选**：`_selected` 里装的是上一个列表的 db_id，
+    //   带过去会让「从歌单移除」移错歌——那是真的改用户的歌单内容。
+    setState(() {
+      _current = item;
+      _playlistTracks = null;
+      _selected.clear();
+      _anchor = null;
+    });
+    try {
+      final tracks = await _api.ipodPlaylistTracks(item.playlistId);
+      if (!mounted) return;
+      setState(() {
+        _playlistTracks = tracks;
+        for (final row in tracks.tracks) {
+          _sizes[row.dbId] = row.size;
+        }
+      });
+    } catch (e) {
+      if (mounted) _toast(e.toString(), error: true);
+    }
+  }
+
+  /// 让用户输入一个歌单名。取消返回 null。
+  Future<String?> _askPlaylistName({
+    required String title,
+    required String hint,
+    String initial = '',
+  }) async {
+    final controller = TextEditingController(text: initial);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: 420,
+          child: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLength: 120,
+            decoration: InputDecoration(hintText: hint),
+            onSubmitted: (value) => Navigator.of(ctx).pop(value.trim()),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (result == null || result.isEmpty) return null;
+    return result;
+  }
+
+  Future<void> _createPlaylist() async {
+    final numbers = _selected.length;
+    final name = await _askPlaylistName(
+      title: '新建歌单',
+      hint: numbers > 0
+          ? '会把当前选中的 $numbers 首一起放进去'
+          : '给这个歌单起个名字',
+    );
+    if (name == null) return;
+    try {
+      await _api.createIpodPlaylist(name, trackIds: _selected.toList());
+      _toast('已提交：新建歌单「$name」');
+      _clearSelection();
+    } catch (e) {
+      await _showRefusal(e.toString());
+    }
+  }
+
+  Future<void> _renamePlaylist() async {
+    final current = _current;
+    if (current == null) return;
+    final name = await _askPlaylistName(
+      title: '歌单改名',
+      hint: '新的名字',
+      initial: current.name,
+    );
+    if (name == null || name == current.name) return;
+    try {
+      await _api.renameIpodPlaylist(current.playlistId, name);
+      _toast('已提交：改名为「$name」');
+    } catch (e) {
+      await _showRefusal(e.toString());
+    }
+  }
+
+  /// 删除歌单。**两步走**：先预览（后端给令牌），确认后才真删。
+  ///
+  /// 后端的 `/delete` 没有真实预览过的令牌就直接拒绝——所以这里漏掉确认框
+  /// 也删不掉，这是有意的结构性保证。
+  Future<void> _deletePlaylist() async {
+    final current = _current;
+    if (current == null) return;
+
+    IpodPlaylistDeletePreview preview;
+    try {
+      preview = await _api.ipodPlaylistDeletePreview(current.playlistId);
+    } catch (e) {
+      await _showRefusal(e.toString());
+      return;
+    }
+    if (!mounted) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.delete_outline),
+        title: Text('删除歌单「${preview.name}」？'),
+        content: SizedBox(
+          width: 520,
+          child: SelectableText(
+            '这个歌单里有 ${preview.count} 首。\n\n${preview.note}',
+            style: const TextStyle(fontSize: 13, height: 1.8),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          // 危险按钮放右边、文案具体到"歌单"，避免跟"删歌"混淆
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除这个歌单'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await _api.deleteIpodPlaylist(
+        current.playlistId,
+        previewId: preview.previewId,
+      );
+      _toast('已提交：删除歌单「${preview.name}」');
+      setState(() => _current = null);
+    } catch (e) {
+      await _showRefusal(e.toString());
+    }
+  }
+
+  /// 把选中的曲目加进某个歌单（先让用户挑一个）。
+  Future<void> _addSelectedToPlaylist() async {
+    if (_selected.isEmpty) return;
+
+    // 「全部歌曲」模式进来时歌单列表还没读过（那是切到歌单模式才读的），
+    // 按需读一次。不读的话下面会误报"设备上还没有可编辑的歌单"。
+    if (_playlists == null) {
+      try {
+        await _fetchPlaylistList();
+      } catch (e) {
+        await _showRefusal(e.toString());
+        return;
+      }
+      if (!mounted) return;
+    }
+
+    final list = _playlists?.playlists ?? const <IpodPlaylist>[];
+    final targets = list.where((p) => p.editable).toList();
+    if (targets.isEmpty) {
+      _toast('设备上还没有可编辑的歌单，先新建一个。', error: true);
+      return;
+    }
+
+    final picked = await showDialog<IpodPlaylist?>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('把选中的 ${_selected.length} 首加进…'),
+        children: <Widget>[
+          for (final item in targets)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(item),
+              child: Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(item.name, overflow: TextOverflow.ellipsis),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '${item.count} 首',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+    if (picked == null) return;
+
+    try {
+      await _api.editIpodPlaylistTracks(
+        picked.playlistId,
+        add: _selected.toList(),
+      );
+      _toast('已提交：加入「${picked.name}」');
+      _clearSelection();
+      // 加完停在这个歌单上，用户能立刻看到结果
+      if (_playlistMode) await _loadPlaylists(selectId: picked.playlistId);
+    } catch (e) {
+      await _showRefusal(e.toString());
+    }
+  }
+
+  Future<void> _removeSelectedFromPlaylist() async {
+    final current = _current;
+    if (current == null || _selected.isEmpty) return;
+
+    try {
+      await _api.editIpodPlaylistTracks(
+        current.playlistId,
+        remove: _selected.toList(),
+      );
+      _toast('已提交：从「${current.name}」移出 ${_selected.length} 首');
+      _clearSelection();
+    } catch (e) {
+      await _showRefusal(e.toString());
+    }
+  }
+
   // ── 界面 ──────────────────────────────────────────────────────────
 
   @override
@@ -515,9 +832,11 @@ class _LibraryPageState extends State<LibraryPage> {
           children: <Widget>[
             _toolbar(page, busy),
             const Divider(height: 1),
-            Expanded(child: _body(page)),
-            if (_selected.isNotEmpty) _actionBar(page),
-            if (page != null && page.pages > 1) _pager(page),
+            Expanded(child: _playlistMode ? _playlistBody() : _body(page)),
+            if (_selected.isNotEmpty)
+              _playlistMode ? _playlistActionBar() : _actionBar(page),
+            // 分页只对「全部歌曲」有意义：歌单里的曲目是一次取完的
+            if (!_playlistMode && page != null && page.pages > 1) _pager(page),
           ],
         ),
       ),
@@ -529,6 +848,37 @@ class _LibraryPageState extends State<LibraryPage> {
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
       child: Row(
         children: <Widget>[
+          // 左半边（模式切换 + 搜索 + 排序）**可横向滚动**。
+          //
+          // ★ 768px 窄窗口下这一条放不下——加了模式切换后实测溢出 127px。
+          //   处理方式跟下面操作栏一致：让它滚，而不是把右边的「导入音乐」
+          //   挤出去。用户找不到主操作比"要多滑一下"糟得多。
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: <Widget>[
+          // 视图模式。放在最前面：它是"这一页在看什么"的开关，
+          // 用户第一眼就该看到，而不是藏在别处。
+          SegmentedButton<bool>(
+            segments: const <ButtonSegment<bool>>[
+              ButtonSegment<bool>(
+                value: false,
+                label: Text('全部歌曲'),
+                icon: Icon(Icons.library_music_outlined, size: 16),
+              ),
+              ButtonSegment<bool>(
+                value: true,
+                label: Text('歌单'),
+                icon: Icon(Icons.queue_music_outlined, size: 16),
+              ),
+            ],
+            selected: <bool>{_playlistMode},
+            showSelectedIcon: false,
+            onSelectionChanged: (value) => _switchMode(value.first),
+          ),
+          const SizedBox(width: 14),
+          if (!_playlistMode) ...<Widget>[
           SizedBox(
             width: 260,
             child: TextField(
@@ -581,11 +931,18 @@ class _LibraryPageState extends State<LibraryPage> {
               },
             ),
           ],
-          const Spacer(),
+          ],  // end if (!_playlistMode)
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
           IconButton(
             icon: const Icon(Icons.refresh, size: 18),
             tooltip: '重新读取',
-            onPressed: _loading ? null : () => _load(),
+            onPressed: _loading
+                ? null
+                : (_playlistMode ? () => _loadPlaylists() : () => _load()),
           ),
           const SizedBox(width: 6),
           OutlinedButton.icon(
@@ -647,60 +1004,63 @@ class _LibraryPageState extends State<LibraryPage> {
 
     return ListView.builder(
       itemCount: page.tracks.length,
-      itemBuilder: (context, index) {
-        final track = page.tracks[index];
-        final selected = _selected.contains(track.dbId);
-        return ContextMenuRegion(
-          actions: () => _menuFor(track),
-          child: ListTile(
-            dense: true,
-            selected: selected,
-            selectedTileColor: Theme.of(context).colorScheme.primaryContainer
-                .withValues(alpha: 0.35),
-            leading: Icon(
-              selected ? Icons.check_box : Icons.check_box_outline_blank,
-              size: 18,
-              color: selected
-                  ? Theme.of(context).colorScheme.primary
-                  : Theme.of(context).colorScheme.outline,
+      itemBuilder: (context, index) => _trackTile(page.tracks[index]),
+    );
+  }
+
+  /// 一行曲目。**两种模式共用**——同一个"曲目"在「全部歌曲」和「歌单」里
+  /// 长得不一样的话，改一处必然漏另一处。
+  Widget _trackTile(TrackRow track) {
+    final selected = _selected.contains(track.dbId);
+    return ContextMenuRegion(
+      actions: () => _menuFor(track),
+      child: ListTile(
+        dense: true,
+        selected: selected,
+        selectedTileColor: Theme.of(context).colorScheme.primaryContainer
+            .withValues(alpha: 0.35),
+        leading: Icon(
+          selected ? Icons.check_box : Icons.check_box_outline_blank,
+          size: 18,
+          color: selected
+              ? Theme.of(context).colorScheme.primary
+              : Theme.of(context).colorScheme.outline,
+        ),
+        title: Text(
+          track.title,
+          style: const TextStyle(fontSize: 13),
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(
+          track.artist.isEmpty
+              ? track.album
+              : '${track.artist}${track.album.isEmpty ? '' : ' · ${track.album}'}',
+          style: const TextStyle(fontSize: 11.5),
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Text(
+              track.lengthText,
+              style: TextStyle(
+                fontSize: 11.5,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
-            title: Text(
-              track.title,
-              style: const TextStyle(fontSize: 13),
-              overflow: TextOverflow.ellipsis,
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 74,
+              child: Text(
+                track.sizeText,
+                textAlign: TextAlign.right,
+                style: const TextStyle(fontSize: 11.5),
+              ),
             ),
-            subtitle: Text(
-              track.artist.isEmpty
-                  ? track.album
-                  : '${track.artist}${track.album.isEmpty ? '' : ' · ${track.album}'}',
-              style: const TextStyle(fontSize: 11.5),
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Text(
-                  track.lengthText,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                SizedBox(
-                  width: 74,
-                  child: Text(
-                    track.sizeText,
-                    textAlign: TextAlign.right,
-                    style: const TextStyle(fontSize: 11.5),
-                  ),
-                ),
-              ],
-            ),
-            onTap: () => _onRowTap(track),
-          ),
-        );
-      },
+          ],
+        ),
+        onTap: () => _onRowTap(track),
+      ),
     );
   }
 
@@ -799,11 +1159,229 @@ class _LibraryPageState extends State<LibraryPage> {
             ),
           ),
           const SizedBox(width: 12),
+          // ★ 只放图标（带 tooltip）。带文字的版本会把左边的「全选筛选结果」
+          //   挤出可视区——实测就是这个后果：用户在窄窗口里点不到它。
+          //   这个文件里已经有一条同类教训（操作栏溢出 127px），原则一样：
+          //   **宁可少一个字的标签，也不能让别的按钮够不着**。
+          //   歌单模式那边空间够，用的是带文字的版本。
+          IconButton(
+            icon: const Icon(Icons.playlist_add, size: 19),
+            tooltip: '把选中的 ${_selected.length} 首加入歌单',
+            onPressed: _addSelectedToPlaylist,
+          ),
           FilledButton.icon(
             icon: const Icon(Icons.delete_outline, size: 17),
             style: FilledButton.styleFrom(backgroundColor: scheme.error),
             label: Text('删除选中的 ${_selected.length} 首'),
             onPressed: _remove,
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _switchMode(bool playlists) {
+    if (_playlistMode == playlists) return;
+    setState(() {
+      _playlistMode = playlists;
+      // 换视图必须清空勾选：两种模式下的曲目集合不同，带着走会误操作
+      _selected.clear();
+      _anchor = null;
+    });
+    if (playlists) unawaited(_loadPlaylists());
+  }
+
+  // ── 歌单视图 ──────────────────────────────────────────────────────
+
+  Widget _playlistBody() {
+    if (_plError != null) {
+      return Padding(
+        padding: const EdgeInsets.all(18),
+        child: Notice(
+          icon: Icons.error_outline,
+          title: '读不到歌单',
+          text: _plError!,
+          color: StatusColors.error,
+          action: TextButton(
+            onPressed: () => _loadPlaylists(),
+            child: const Text('重试'),
+          ),
+        ),
+      );
+    }
+    if (_playlists == null) {
+      return const Padding(
+        padding: EdgeInsets.all(18),
+        child: LoadingLine(text: '正在读取 iPod 上的歌单…'),
+      );
+    }
+
+    final tracks = _playlistTracks;
+    return Column(
+      children: <Widget>[
+        _playlistChips(),
+        const Divider(height: 1),
+        Expanded(
+          child: tracks == null
+              ? const Padding(
+                  padding: EdgeInsets.all(18),
+                  child: LoadingLine(text: '正在读取歌单里的曲目…'),
+                )
+              : tracks.tracks.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Notice(
+                        icon: Icons.queue_music_outlined,
+                        title: '「${tracks.name}」还是空的',
+                        text: _current?.editable == false
+                            ? (_current?.readonlyReason ?? '')
+                            : '切到「全部歌曲」勾选几首，再点下面的「加入歌单…」。',
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: tracks.tracks.length,
+                      itemBuilder: (context, index) =>
+                          _trackTile(tracks.tracks[index]),
+                    ),
+        ),
+      ],
+    );
+  }
+
+  /// 横向的歌单选择条。一个歌单一个 chip，点一下切换。
+  Widget _playlistChips() {
+    final list = _playlists!;
+    final scheme = Theme.of(context).colorScheme;
+    final current = _current;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: <Widget>[
+                  for (final item in list.playlists)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: Tooltip(
+                        // 不能编辑的要把原因说出来，不能只是"点了没反应"
+                        message: item.editable
+                            ? '${item.datasetText}播放列表 · ${item.count} 首'
+                            : item.readonlyReason,
+                        child: ChoiceChip(
+                          selected: item.playlistId == current?.playlistId,
+                          onSelected: (_) => unawaited(_selectPlaylist(item)),
+                          avatar: item.editable
+                              ? null
+                              : Icon(
+                                  Icons.lock_outline,
+                                  size: 14,
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                          label: Text(
+                            '${item.dataset == 'mhlp' ? item.name : '${item.name} · ${item.datasetText}'}  ${item.count}',
+                            style: const TextStyle(fontSize: 12.5),
+                          ),
+                        ),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ActionChip(
+                      avatar: const Icon(Icons.add, size: 15),
+                      label: const Text('新建歌单', style: TextStyle(fontSize: 12.5)),
+                      // 读歌单的过程中不让点：这些操作都要先知道"现在有哪些歌单"
+                      // （比如新建要查重名），拿旧数据去写会撞车
+                      onPressed: _plLoading ? null : _createPlaylist,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // 改名/删除固定在最右：歌单多了以后横向滚动条会把它们挤出去，
+          // 而"找不到删除按钮"比"看不到某个歌单"糟得多
+          TextButton.icon(
+            icon: const Icon(Icons.drive_file_rename_outline, size: 16),
+            label: const Text('改名'),
+            onPressed: (current?.editable ?? false) && !_plLoading
+                ? _renamePlaylist
+                : null,
+          ),
+          TextButton.icon(
+            icon: const Icon(Icons.delete_outline, size: 16),
+            style: TextButton.styleFrom(foregroundColor: scheme.error),
+            label: const Text('删除歌单'),
+            onPressed: (current?.editable ?? false) && !_plLoading
+                ? _deletePlaylist
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _playlistActionBar() {
+    final scheme = Theme.of(context).colorScheme;
+    final current = _current;
+    final editable = current?.editable ?? false;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.primaryContainer.withValues(alpha: 0.45),
+        border: Border(top: BorderSide(color: scheme.outlineVariant)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: <Widget>[
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: <Widget>[
+                  Text(
+                    '已选 ${_selected.length} 首 · $_humanBytes',
+                    style: const TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  TextButton(
+                    onPressed: _playlistTracks?.tracks.isEmpty ?? true
+                        ? null
+                        : () => setState(() {
+                              _selected
+                                ..clear()
+                                ..addAll(
+                                  _playlistTracks!.tracks.map((t) => t.dbId),
+                                );
+                            }),
+                    child: Text('全选本歌单（${_playlistTracks?.tracks.length ?? 0} 首）'),
+                  ),
+                  TextButton(
+                    onPressed: _clearSelection,
+                    child: const Text('清空选择（Esc）'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.playlist_add, size: 17),
+            label: const Text('加入其它歌单…'),
+            onPressed: _addSelectedToPlaylist,
+          ),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            icon: const Icon(Icons.playlist_remove, size: 17),
+            label: Text('从「${current?.name ?? ''}」移出 ${_selected.length} 首'),
+            onPressed: editable ? _removeSelectedFromPlaylist : null,
           ),
         ],
       ),

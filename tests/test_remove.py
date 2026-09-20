@@ -29,7 +29,7 @@ from ipod_cli.remover import (
 
 pytestmark = ffmpeg_required
 
-IPOD_NAME = "铁头的 IPO"
+IPOD_NAME = "我的 iPod"
 USER_PLAYLIST = "精选"
 
 

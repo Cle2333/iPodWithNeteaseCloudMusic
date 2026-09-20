@@ -444,7 +444,7 @@ git fetch upstream && git cherry-pick <commit>
 
 | | 写入前 | 写入后 |
 | --- | --- | --- |
-| 主播放列表名 | 铁头的 IPO | **iPod** |
+| 主播放列表名 | 我的 iPod | **iPod** |
 | 用户播放列表 | On-The-Go 2 | **丢失** |
 | 智能播放列表 | 5 个 | **全部丢失** |
 
@@ -533,12 +533,12 @@ uv run ipod export ~/备份 --ipod D:\ --csv 清单.csv
 
 | 验证项 | 结果 |
 | --- | --- |
-| 设备识别 | ✅ 型号 MB029、GUID `0x000A270013473EA3`、HASH58，全对 |
+| 设备识别 | ✅ 型号 MB029、GUID `0x000A270000000001`、HASH58，全对 |
 | 读库 | ✅ 116 首中文标签全部正确解析 |
 | 导入 2 首（1 转码 + 1 原生带封面） | ✅ 116 → 118 首 |
 | 原有曲目字段 | ✅ 逐字段比对，**零差异**（Artist/Album/Genre/size/length/bitrate/track_number/year/rating/play_count/filetype/Location） |
 | 播放列表 | ✅ 2+5+1 个全部保留，成员数正确 |
-| iPod 名字 | ✅ 「铁头的 IPO」保留 |
+| iPod 名字 | ✅ 「我的 iPod」保留 |
 | 封面 | ✅ 117/118 有可用封面，**悬空 0** |
 | 文件一致性 | ✅ 118 引用 = 118 磁盘文件，0 孤儿 0 缺失 |
 | 签名 | ✅ `hashing_scheme=1`，`hash58` 非零 |

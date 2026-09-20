@@ -20,7 +20,7 @@ from iopenpod.itunesdb_writer import PlaylistInfo, TrackInfo, write_itunesdb
 from ipod_cli.importer import build_import_plan, execute_import
 from ipod_cli.library import read_library
 
-IPOD_NAME = "铁头的 IPO"      # 故意用真机上的名字，含中文和空格
+IPOD_NAME = "我的 iPod"      # 故意用真机上的名字，含中文和空格
 USER_PLAYLIST = "跑步歌单"
 
 

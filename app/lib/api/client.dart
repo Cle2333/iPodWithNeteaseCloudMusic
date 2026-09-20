@@ -342,6 +342,79 @@ class ApiClient {
     return json['job_id']?.toString() ?? '';
   }
 
+  // ── iPod 上的歌单管理 ──────────────────────────────────────────────
+  //
+  // 注意跟「歌单」页那些方法区分：这里动的是 **iPod 设备上**的播放列表结构，
+  // 不是网易云的在线歌单。写操作全部走作业队列，返回 job_id。
+
+  Future<IpodPlaylistList> ipodPlaylists() async => IpodPlaylistList.fromJson(
+    await _get('/api/library/playlists', timeout: const Duration(seconds: 30)),
+  );
+
+  Future<IpodPlaylistTracks> ipodPlaylistTracks(String playlistId) async =>
+      IpodPlaylistTracks.fromJson(
+        await _get(
+          '/api/library/playlists/$playlistId/tracks',
+          timeout: const Duration(seconds: 30),
+        ),
+      );
+
+  Future<String> createIpodPlaylist(
+    String name, {
+    List<String> trackIds = const <String>[],
+  }) async {
+    final json = await _post(
+      '/api/library/playlists/create',
+      body: <String, dynamic>{'name': name, 'track_ids': trackIds},
+    );
+    return json['job_id']?.toString() ?? '';
+  }
+
+  Future<String> renameIpodPlaylist(String playlistId, String name) async {
+    final json = await _post(
+      '/api/library/playlists/$playlistId/rename',
+      body: <String, dynamic>{'name': name},
+    );
+    return json['job_id']?.toString() ?? '';
+  }
+
+  /// 删除预览。**必须走这一步**——执行删除时要带回 [IpodPlaylistDeletePreview.previewId]。
+  Future<IpodPlaylistDeletePreview> ipodPlaylistDeletePreview(
+    String playlistId,
+  ) async => IpodPlaylistDeletePreview.fromJson(
+    await _post(
+      '/api/library/playlists/delete/preview',
+      body: <String, dynamic>{'playlist_id': playlistId},
+    ),
+  );
+
+  Future<String> deleteIpodPlaylist(
+    String playlistId, {
+    required String previewId,
+  }) async {
+    final json = await _post(
+      '/api/library/playlists/delete',
+      body: <String, dynamic>{
+        'playlist_id': playlistId,
+        'preview_id': previewId,
+      },
+    );
+    return json['job_id']?.toString() ?? '';
+  }
+
+  /// 往歌单里加 / 从歌单里移。传的是**增量**，不是整份替换。
+  Future<String> editIpodPlaylistTracks(
+    String playlistId, {
+    List<String> add = const <String>[],
+    List<String> remove = const <String>[],
+  }) async {
+    final json = await _post(
+      '/api/library/playlists/$playlistId/tracks',
+      body: <String, dynamic>{'add': add, 'remove': remove},
+    );
+    return json['job_id']?.toString() ?? '';
+  }
+
   // ── 内部 ──────────────────────────────────────────────────────────
 
   Future<Map<String, dynamic>> _get(String path, {Duration? timeout}) =>

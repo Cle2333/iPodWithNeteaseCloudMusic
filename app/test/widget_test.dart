@@ -36,8 +36,8 @@ void main() {
         'identity': <String, dynamic>{
           'name': '我的iPod',
           'model_number': 'MB029',
-          'serial': '8K8097CUY5N',
-          'firewire_guid': '0x000A270013473EA3',
+          'serial': 'TESTSERIAL01',
+          'firewire_guid': '0x000A270000000001',
           'checksum': 'HASH58',
         },
         'storage': <String, dynamic>{
@@ -59,7 +59,7 @@ void main() {
 
       expect(info.connected, isTrue);
       expect(info.identity!.modelNumber, 'MB029');
-      expect(info.identity!.serial, '8K8097CUY5N');
+      expect(info.identity!.serial, 'TESTSERIAL01');
       expect(info.storage!.freeText, '79.6 GB');
       expect(info.content!.playlistNames.length, 2);
       expect(info.content!.durationText, '8 分');

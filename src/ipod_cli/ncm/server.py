@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -199,13 +200,44 @@ def start(base_url: str, bundle_dir: Path | None) -> bool:
     return False
 
 
+def _redact(text: str) -> str:
+    """把 node 输出里的凭据抹掉再转发进日志。
+
+    ★ 为什么必须做：api-enhanced 会把它收到的**整条请求 URL** 打出来，而那条
+    URL 上带着 `cookie=...`——网易云的 cookie 就是**完整的登录凭据**（拿去
+    就能当用户用）。它在界面上显示一下无所谓，但落到**日志文件**里就是另一回事：
+
+    * 用户报障时会把日志发出来
+    * 日志在 `%APPDATA%` 下，备份/同步盘/截图都可能带走
+
+    这里在**转发的那一道**统一抹掉，而不是去改第三方服务的日志（改不动，
+    而且它升级就没了）。
+    """
+    if not text:
+        return text
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+#: (正则, 替换)。宁可多抹一点：日志里少一个参数不影响排查，
+#: 泄一次凭据是另一回事。
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(cookie=)[^&\s\"']+", re.I), r"\1<已隐去>"),
+    (re.compile(r"((?:__csrf|token|MUSIC_[AUR]_T|MUSIC_[AUR]_U)=)[^&;\s\"']+", re.I),
+     r"\1<已隐去>"),
+    (re.compile(r"(\"?(?:cookie|authorization|set-cookie)\"?\s*[:=]\s*\"?)[^\"\n]+", re.I),
+     r"\1<已隐去>"),
+)
+
+
 def _pump(proc: subprocess.Popen) -> None:
-    """把子进程输出搬进日志。"""
+    """把子进程输出搬进日志（凭据先抹掉）。"""
     try:
         if proc.stdout is None:
             return
         for line in proc.stdout:
-            text = line.rstrip()
+            text = _redact(line.rstrip())
             if text:
                 log.info("%s", text)
     except Exception:  # noqa: BLE001 - 收尾阶段的读取失败不值得炸

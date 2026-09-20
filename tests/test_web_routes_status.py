@@ -166,8 +166,8 @@ def _fake_device(root: Path):
         generation="6th Gen",
         capacity="80GB",
         color="Silver",
-        serial="8K8097CUY5N",
-        firewire_guid="0x000A270013473EA3",
+        serial="TESTSERIAL01",
+        firewire_guid="0x000A270000000001",
         checksum="HASH58",
         total_bytes=79_800_000_000,
         free_bytes=79_600_000_000,
@@ -216,8 +216,8 @@ class TestDeviceInfo:
         assert data["connected"] is True
         ident = data["identity"]
         assert ident["model_number"] == "MB029"
-        assert ident["serial"] == "8K8097CUY5N"
-        assert ident["firewire_guid"] == "0x000A270013473EA3"
+        assert ident["serial"] == "TESTSERIAL01"
+        assert ident["firewire_guid"] == "0x000A270000000001"
         assert ident["checksum"] == "HASH58"
         assert ident["name"] == "我的iPod"
 

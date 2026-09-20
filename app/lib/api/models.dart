@@ -1231,3 +1231,138 @@ class VerifyCheck {
     details: _list(json['details']).map((e) => e.toString()).toList(),
   );
 }
+
+
+// ──────────────────────────────────────────────────────────────────────
+// iPod 上的播放列表（跟「歌单」页那些**网易云在线歌单**不是一回事）
+// ──────────────────────────────────────────────────────────────────────
+
+/// iPod 上的一个播放列表。
+///
+/// `editable` 为 false 时 `readonlyReason` 一定有值——界面必须把原因显示出来，
+/// 而不是让某些歌单"莫名不能点"。主列表（两个数据集各一个）和智能/播客列表
+/// 都属于这一类。
+class IpodPlaylist {
+  const IpodPlaylist({
+    required this.playlistId,
+    required this.name,
+    required this.count,
+    required this.dataset,
+    required this.datasetText,
+    required this.isMaster,
+    required this.isDeviceName,
+    required this.editable,
+    required this.readonlyReason,
+  });
+
+  /// 播放列表 id（**字符串**：64 位无符号，理由同 TrackRow.dbId）。
+  final String playlistId;
+  final String name;
+  final int count;
+
+  /// `mhlp` / `mhlp_podcast` / `mhlp_smart`
+  final String dataset;
+
+  /// 中文的数据集名（普通 / 播客 / 智能）。
+  final String datasetText;
+
+  /// 是不是本数据集的主列表。**普通和播客各有一个**，两个标题都是 iPod 的名字，
+  /// 所以列表里看到两条同名是正常的（靠 datasetText 区分）。
+  final bool isMaster;
+
+  /// 是不是"iPod 名字的载体"（只有普通数据集的主列表是）。
+  final bool isDeviceName;
+
+  final bool editable;
+  final String readonlyReason;
+
+  factory IpodPlaylist.fromJson(Map<String, dynamic> json) => IpodPlaylist(
+    playlistId: _str(json['playlist_id']),
+    name: _str(json['name']),
+    count: _int(json['count']),
+    dataset: _str(json['dataset']),
+    datasetText: _str(json['dataset_text']),
+    isMaster: json['is_master'] == true,
+    isDeviceName: json['is_device_name'] == true,
+    editable: json['editable'] != false,
+    readonlyReason: _str(json['readonly_reason']),
+  );
+}
+
+class IpodPlaylistList {
+  const IpodPlaylistList({
+    required this.playlists,
+    required this.masterId,
+    required this.trackCount,
+  });
+
+  final List<IpodPlaylist> playlists;
+
+  /// 普通数据集主列表的 id（设备名存在它标题里）。
+  final String masterId;
+  final int trackCount;
+
+  factory IpodPlaylistList.fromJson(Map<String, dynamic> json) => IpodPlaylistList(
+    playlists: _list(json['playlists'])
+        .map((e) => IpodPlaylist.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    masterId: _str(json['master_id']),
+    trackCount: _int(json['track_count']),
+  );
+}
+
+class IpodPlaylistTracks {
+  const IpodPlaylistTracks({
+    required this.playlistId,
+    required this.name,
+    required this.datasetText,
+    required this.tracks,
+    required this.editable,
+    required this.readonlyReason,
+  });
+
+  final String playlistId;
+  final String name;
+  final String datasetText;
+  final List<TrackRow> tracks;
+  final bool editable;
+  final String readonlyReason;
+
+  factory IpodPlaylistTracks.fromJson(Map<String, dynamic> json) =>
+      IpodPlaylistTracks(
+        playlistId: _str(json['playlist_id']),
+        name: _str(json['name']),
+        datasetText: _str(json['dataset_text']),
+        tracks: _list(json['tracks'])
+            .map((e) => TrackRow.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        editable: json['editable'] != false,
+        readonlyReason: _str(json['readonly_reason']),
+      );
+}
+
+/// 删除歌单的预览结果。
+class IpodPlaylistDeletePreview {
+  const IpodPlaylistDeletePreview({
+    required this.previewId,
+    required this.name,
+    required this.count,
+    required this.note,
+  });
+
+  /// 执行删除时必须带回它（后端会拒绝没有真实预览过的删除）。
+  final String previewId;
+  final String name;
+  final int count;
+
+  /// 后端写好的中文说明（含"歌本身不会被删"这句）。
+  final String note;
+
+  factory IpodPlaylistDeletePreview.fromJson(Map<String, dynamic> json) =>
+      IpodPlaylistDeletePreview(
+        previewId: _str(json['preview_id']),
+        name: _str(json['name']),
+        count: _int(json['count']),
+        note: _str(json['note']),
+      );
+}

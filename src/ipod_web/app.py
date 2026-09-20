@@ -24,6 +24,7 @@ from ipod_web.context import WebContext
 from ipod_web.routes import (
     account,
     debug,
+    ipod_playlists,
     jobs,
     library,
     playlists,
@@ -35,7 +36,7 @@ from ipod_web.routes import (
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
-VERSION = "0.1.0"
+VERSION = "0.3.0"
 
 log = logging.getLogger("ipod_web")
 
@@ -81,6 +82,8 @@ def create_app(ctx: WebContext | None = None) -> FastAPI:
     app.include_router(settings.router)
     app.include_router(playlists.router)
     app.include_router(library.router)
+    # iPod 上的歌单管理（跟 playlists.router 是两回事：那个是网易云在线歌单）
+    app.include_router(ipod_playlists.router)
     app.include_router(jobs.router)
     app.include_router(debug.router)
 

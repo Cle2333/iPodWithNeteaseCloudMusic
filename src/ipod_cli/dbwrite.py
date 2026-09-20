@@ -188,10 +188,40 @@ def _upsert_playlists(existing: list, incoming: list) -> list:
     """按名字合并播放列表：同名的用新的替换，其余原样保留。
 
     这样"同步同一个歌单"每次跑都是覆盖，不会在 iPod 上堆出一串同名列表。
+
+    ★ **替换时必须继承旧列表的 `playlist_id`。**
+
+    写入器在 `playlist_id is None` 时**会生成一个新的**。于是"改一次成员 =
+    换一个身份"，后果有两个：
+
+    * 界面上刚拿到的 id 立刻失效——下一次拿它去操作就是 404（实测踩到：
+      加完歌再读这个歌单，报"iPod 上没有这个歌单"，其实就在那儿）。
+    * **同步每跑一次，同名播放列表就换一个 id**。设备上任何按 id 引用它的
+      东西（On-The-Go、Genius 等）就断了。这是静默的数据完整性问题，
+      不会报错，只会让人觉得"iPod 上的播放列表怪怪的"。
+
+    同名就是同一个播放列表，身份必须延续。
     """
+    import dataclasses
+
     incoming_names = {getattr(p, "name", "") for p in incoming}
     kept = [p for p in existing if getattr(p, "name", "") not in incoming_names]
-    return kept + list(incoming)
+    by_name = {getattr(p, "name", ""): p for p in existing}
+
+    merged: list = []
+    for item in incoming:
+        old = by_name.get(getattr(item, "name", ""))
+        old_id = getattr(old, "playlist_id", None) if old is not None else None
+        if old_id and not getattr(item, "playlist_id", None):
+            if dataclasses.is_dataclass(item):
+                item = dataclasses.replace(item, playlist_id=old_id)
+            else:
+                try:
+                    item.playlist_id = old_id
+                except Exception:  # noqa: BLE001 - 不可写就算了，别因此写坏库
+                    pass
+        merged.append(item)
+    return kept + merged
 
 
 def _build_playlist_args(
@@ -259,7 +289,24 @@ def _build_playlist_args(
         args["podcast_master_playlist_name"] = ds3_name
     if ds3_id is not None:
         args["podcast_master_playlist_id"] = ds3_id
-    if ds3_playlists:
+    if ds3_raw:
+        # ★ **必须显式传**，哪怕列表是空的。
+        #
+        # 写入器那条路径的语义是：`podcast_playlists=None` → **把 dataset 2 的歌单
+        # 克隆一份到 dataset 3**（`mhbd_writer.py` 里 `source_playlists_type3 =
+        # playlists_type2 if playlists_type3 is None else playlists_type3`）。
+        # 那是 libgpod **新建库**时的兼容行为；**重写已有设备库**时用它是错的：
+        # 设备上"没有非主播客歌单"本来就是常态（`ds3_playlists` 会是空的），
+        # 于是每导一次歌，普通歌单就被复制一份进播客数据集，越堆越多。
+        #
+        # 实测症状：新建一个歌单后，`mhlp` 和 `mhlp_podcast` 里各出现一条同名，
+        # 界面上看到两个；改名/删除只动得掉普通那份，播客那份留下——
+        # 看起来就像"删了没删掉"。
+        #
+        # 传空列表是有意义的（写入器文档明说）：dataset 3 只写它自己生成的主列表。
+        # 设备**完全没有** ds3 时不传（空 `ds3_raw`），保持新建库的兼容行为。
+        args["podcast_playlists"] = list(ds3_playlists or [])
+    elif ds3_playlists:
         args["podcast_playlists"] = ds3_playlists
     if ds5_playlists:
         args["smart_playlists"] = ds5_playlists

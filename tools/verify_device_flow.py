@@ -49,7 +49,10 @@ FAILURES: list[str] = []
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
-    print(f"  {'[OK]  ' if ok else '[FAIL]'} {label}" + (f"  {detail}" if detail else ""))
+    # detail 只在**失败**时打：通过时还打出来会让人误会
+    # （实测出现过"旧名字没了  还在：彩排歌单19376"这种自相矛盾的行）
+    print(f"  {'[OK]  ' if ok else '[FAIL]'} {label}"
+          + (f"  {detail}" if detail and not ok else ""))
     if not ok:
         FAILURES.append(label)
 
@@ -222,11 +225,18 @@ def main() -> int:
     after = api("GET", "/api/library/tracks", timeout=60)
     tracks_after = after.get("tracks") or []
     print(f"        曲目 {len(tracks_after)} 首（导入前 {len(tracks_before)}）")
-    check("曲目数增加了", len(tracks_after) > len(tracks_before),
-          f"{len(tracks_before)} → {len(tracks_after)}")
     names_after = {(t.get("title") or "").strip() for t in tracks_after}
-    check("新曲目能查到", len(names_after - names_before) > 0,
-          f"新增 {sorted(names_after - names_before)[:3]}")
+    gained = names_after - names_before
+    if gained:
+        check("曲目数增加了", len(tracks_after) > len(tracks_before),
+              f"{len(tracks_before)} → {len(tracks_after)}")
+        check("新曲目能查到", True, f"新增 {sorted(gained)[:3]}")
+    else:
+        # 这首歌本来就在设备上（重复跑这个脚本就会这样）。那不是失败——
+        # **导入是幂等的**才是正确行为，这里改成断言"没有重复导入"。
+        print("        这首已经在设备上了（导入是幂等的，没重复写入）")
+        check("重复导入没有把曲目变多", len(tracks_after) == len(tracks_before),
+              f"{len(tracks_before)} → {len(tracks_after)}")
 
     print("══ 6. 健康检查 ══")
     try:
@@ -256,7 +266,106 @@ def main() -> int:
     except urllib.error.HTTPError as exc:
         check("健康检查跑完", False, f"HTTP {exc.code}")
 
-    print("══ 7. 收尾 ══")
+    print("══ 7. 歌单往返（新建 → 加歌 → 移出 → 改名 → 删除）══")
+    # ★ 这一整套的价值在于最后一条：**删歌单不能删歌**。
+    #   歌单和曲目在同一份 iTunesDB 里，写错一个字段就会连歌一起没。
+    marker = f"彩排歌单{int(time.time()) % 100000}"
+    try:
+        playlists = api("GET", "/api/library/playlists", timeout=60)["playlists"]
+        print(f"        设备上现有 {len(playlists)} 个播放列表")
+        names_before = {p["name"] for p in playlists}
+        # ★ 播客数据集的用户歌单数，**开始时**记一份。
+        #   真机的 On-The-Go 在普通和播客两个数据集里本来就各有一份，
+        #   所以判据只能是"没有变多"，不能是"必须是空的"（第一版就是这么
+        #   写错的，把设备原有结构当成我们克隆的）。
+        podcast_before = [p["name"] for p in playlists
+                          if p["dataset"] == "mhlp_podcast" and not p["is_master"]]
+        check("列表里没有重名", len(names_before) >= len(
+            [p for p in playlists if p["dataset"] == "mhlp"]) - 1)
+
+        # 新建
+        started = api("POST", "/api/library/playlists/create",
+                      {"name": marker, "track_ids": []}, timeout=60)
+        job = wait_job(started["job_id"])
+        check("新建歌单成功", job.get("state") == "done", str(job.get("error") or ""))
+        created = [p for p in api("GET", "/api/library/playlists", timeout=60)["playlists"]
+                   if p["name"] == marker]
+        check("新歌单出现在列表里", len(created) == 1)
+        if not created:
+            raise RuntimeError("新歌单没出现，后面的步骤跳过")
+        pl_id = created[0]["playlist_id"]
+        check("新歌单可编辑", created[0]["editable"] is True)
+
+        # 加歌
+        library_ids = [t_["db_id"] for t_ in
+                       api("GET", "/api/library/tracks", timeout=60)["tracks"]][:2]
+        started = api("POST", f"/api/library/playlists/{pl_id}/tracks",
+                      {"add": library_ids}, timeout=60)
+        job = wait_job(started["job_id"])
+        check("把歌加进歌单成功", job.get("state") == "done", str(job.get("error") or ""))
+        after_add = api("GET", f"/api/library/playlists/{pl_id}/tracks", timeout=60)
+        check("歌单里有了这两首", after_add["count"] == len(library_ids),
+              f"count={after_add['count']}")
+
+        # 移出一首
+        started = api("POST", f"/api/library/playlists/{pl_id}/tracks",
+                      {"remove": library_ids[:1]}, timeout=60)
+        job = wait_job(started["job_id"])
+        check("从歌单移出成功", job.get("state") == "done")
+        check("歌单少了一首",
+              api("GET", f"/api/library/playlists/{pl_id}/tracks", timeout=60)["count"]
+              == len(library_ids) - 1)
+        # ★★ 移出歌单**不能删歌**
+        now_tracks = api("GET", "/api/library/tracks", timeout=60)
+        check("移出歌单没有删掉曲目本身",
+              len(now_tracks["tracks"]) == len(tracks_after),
+              f"{len(tracks_after)} → {len(now_tracks['tracks'])}")
+
+        # 改名
+        renamed = f"{marker}改"
+        started = api("POST", f"/api/library/playlists/{pl_id}/rename",
+                      {"name": renamed}, timeout=60)
+        job = wait_job(started["job_id"])
+        check("歌单改名成功", job.get("state") == "done", str(job.get("error") or ""))
+        now_names = [p["name"] for p in
+                     api("GET", "/api/library/playlists", timeout=60)["playlists"]]
+        check("新名字在列表里", renamed in now_names)
+        check("旧名字没了", marker not in now_names)
+
+        # 删除。★ 改名之后 id 可能已经变了（后端现在会沿用原 id，但这里
+        #   重新查一遍更稳——脚本不该依赖"id 一定没变"这个假设）
+        renamed_row = [p for p in
+                       api("GET", "/api/library/playlists", timeout=60)["playlists"]
+                       if p["name"] == renamed]
+        check("改名后还能按名字找回来", len(renamed_row) == 1)
+        pl_id = renamed_row[0]["playlist_id"] if renamed_row else pl_id
+        preview = api("POST", "/api/library/playlists/delete/preview",
+                      {"playlist_id": pl_id}, timeout=60)
+        check("删除预览说清歌不会被删", "不会被删" in (preview.get("note") or ""))
+        started = api("POST", "/api/library/playlists/delete",
+                      {"playlist_id": pl_id, "preview_id": preview["preview_id"]},
+                      timeout=60)
+        job = wait_job(started["job_id"])
+        check("删除歌单成功", job.get("state") == "done", str(job.get("error") or ""))
+        final_names = [p["name"] for p in
+                       api("GET", "/api/library/playlists", timeout=60)["playlists"]]
+        check("歌单真的没了", renamed not in final_names, f"还在：{final_names}")
+        # ★★★ 这一条是整套里最重要的：删歌单绝不能删歌
+        final_tracks = api("GET", "/api/library/tracks", timeout=60)
+        check("★★ 删歌单之后曲目一首没少",
+              len(final_tracks["tracks"]) == len(tracks_after),
+              f"{len(tracks_after)} → {len(final_tracks['tracks'])}")
+        # 而且不能把普通歌单克隆进播客数据集（判据是"没变多"）
+        final_pls = api("GET", "/api/library/playlists", timeout=60)["playlists"]
+        podcast_after = [p["name"] for p in final_pls
+                         if p["dataset"] == "mhlp_podcast" and not p["is_master"]]
+        check("播客数据集没被克隆出歌单",
+              set(podcast_after) <= set(podcast_before),
+              f"多出：{sorted(set(podcast_after) - set(podcast_before))}")
+    except Exception as exc:  # noqa: BLE001
+        check("歌单往返", False, f"{type(exc).__name__}: {exc}")
+
+    print("══ 8. 收尾 ══")
     subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
     time.sleep(4)
     try:

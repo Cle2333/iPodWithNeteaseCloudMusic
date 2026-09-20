@@ -65,8 +65,8 @@ class IdsRequest(BaseModel):
 PREVIEW_TTL = 600.0
 
 
-class _PreviewStore:
-    """删除预览令牌。
+class PreviewStore:
+    """删除预览令牌（曲目删除、歌单删除共用这一套语义）。
 
     **存在的唯一目的：让「先预览」成为结构性的保证，而不是界面自觉。**
 
@@ -111,7 +111,10 @@ class _PreviewStore:
 
 #: 删除预览令牌仓库。**进程级**——重启后端就等于作废所有令牌，这是对的：
 #: 重启后设备可能已经被别的东西改过，旧的预览结论不该继续有效。
-_previews = _PreviewStore()
+_previews = PreviewStore()
+
+# 兼容别名：本模块内和测试里还有 `_PreviewStore` 的旧引用
+_PreviewStore = PreviewStore
 
 
 
@@ -122,7 +125,11 @@ def _ms_text(ms: int) -> str:
     return f"{total // 60}:{total % 60:02d}"
 
 
-def _track_row(track, index: int) -> dict[str, Any]:
+def track_row(track, index: int) -> dict[str, Any]:
+    """曲目行的统一形状。
+
+    歌单曲目接口也用它——两边形状一致，界面就不用写第二套渲染。
+    """
     return {
         "index": index,
         "db_id": str(track.db_track_id),
@@ -205,7 +212,7 @@ def list_tracks(
         "total_text": human_size(filtered_bytes) if filtered_bytes else "0 B",
         "ipod_name": library.ipod_name,
         "sorts": [{"value": k, "label": v} for k, v in SORTS.items()],
-        "tracks": [_track_row(t, i) for i, t in window],
+        "tracks": [track_row(t, i) for i, t in window],
     }
 
 
