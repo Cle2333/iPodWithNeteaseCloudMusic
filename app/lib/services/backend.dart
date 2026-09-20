@@ -1,26 +1,42 @@
 /// 后端进程的生命周期管理。
 ///
-/// 自动拉起后端的好处是"点开就能用"，代价是**它变成了黑箱**——
-/// 所以这里把子进程的 stdout/stderr 全收下来喂给调试面板。
+/// 有**两种运行模式**，默认走嵌入：
 ///
-/// 两个从实测里学来的教训，都写进代码了：
+/// 1. **嵌入**（发行版默认）——Python 跑在**本进程**里（serious_python 把它
+///    拉在一条独立线程上）。用户不需要装 uv、没有子进程、也不会留下孤儿后端。
+/// 2. **外挂**——像以前那样 `uv run ipod-web` 起一个子进程。开发时改 Python
+///    能重启后端看效果，出问题也能一键退回这条路。
+///    用环境变量 `IPOD_MANAGER_EXTERNAL_BACKEND=1` 切换。
 ///
-/// 1. **杀进程必须杀整棵树**。`uv run ipod-web` 是两层的
-///    （uv 启动器 → python/uvicorn），杀启动器不会杀掉真正在监听的
-///    那个。症状是端口仍被占、日志文件被锁、下次启动失败，
-///    而表面上"进程已经杀掉了"。
+/// 外挂那条路有两个从实测里学来的教训，注释都留在代码里了：
 ///
-/// 2. **启动前先探测**。上一次没清干净的后端可能还活着，
-///    盲目再起一个只会撞端口。能复用就复用。
+/// 1. **杀进程必须杀整棵树**。`uv run ipod-web` 是两层的（uv 启动器 →
+///    python/uvicorn），杀启动器不会杀掉真正在监听的 那个。症状是端口仍被占、
+///    日志文件被锁、下次启动失败，而表面上"进程已经杀掉了"。
+///
+/// 2. **启动前先探测**。上一次没清干净的后端可能还活着，盲目再起一个只会撞端口。
+///    能复用就复用。
+///
+/// 嵌入模式把这两条都**消灭**了：没有子进程，也就没有孤儿和进程树。
 library;
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:io' as io; // 只为拿顶层 `pid`：本类有个同名字段，得区分开
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
+import 'package:serious_python/serious_python.dart';
 
 import '../api/client.dart';
+
+/// 本进程 PID。
+///
+/// 嵌入模式下"后端进程"就是**本进程**——没有子进程可报，报自己的才对，
+/// 否则调试面板会显示一个不存在的 PID。
+final int _ownPid = io.pid;
 
 enum BackendPhase {
   /// 还没动
@@ -39,13 +55,40 @@ enum BackendPhase {
   stopped,
 }
 
+/// 后端跑在哪。
+enum BackendMode {
+  /// Python 在本进程内（serious_python）。发行版的默认。
+  embedded,
+
+  /// `uv run ipod-web` 起子进程。开发/回退用。
+  external,
+}
+
 /// 日志缓冲上限。长跑的程序不能让它无限涨。
 const int kMaxLogLines = 800;
 
+/// 切换模式的开关。`=1` 走外挂子进程，其余（含不设）走嵌入。
+const String kExternalBackendEnv = 'IPOD_MANAGER_EXTERNAL_BACKEND';
+
+/// 传给嵌入 Python 的环境变量名，跟 `app/python/main.py` 里的常量对齐。
+const String _kPortEnv = 'IPOD_MANAGER_PORT';
+const String _kDataDirEnv = 'IPOD_MANAGER_DATA_DIR';
+
 class BackendService extends ChangeNotifier {
-  BackendService({required this.port});
+  BackendService({required this.port, BackendMode? mode})
+      : mode = mode ?? resolveMode();
 
   final int port;
+
+  /// 当前模式。构造时定下，之后不变——中途换模式意味着"Python 到底在不在本进程里"
+  /// 这件事会变，状态机的复杂度会失控，而这个开关本来就只需要重启应用。
+  final BackendMode mode;
+
+  static BackendMode resolveMode() {
+    final raw = Platform.environment[kExternalBackendEnv];
+    final external = raw != null && raw.trim() == '1';
+    return external ? BackendMode.external : BackendMode.embedded;
+  }
 
   BackendPhase phase = BackendPhase.idle;
   String message = '尚未启动';
@@ -102,7 +145,7 @@ class BackendService extends ChangeNotifier {
 
   // ── 启动 ──────────────────────────────────────────────────────────
 
-  /// 拉起后端；已经有活着的就直接复用。
+  /// 把后端弄到能用；已经有活着的就直接复用。
   Future<bool> start({Duration timeout = const Duration(seconds: 90)}) async {
     if (phase == BackendPhase.starting) return false;
 
@@ -124,7 +167,85 @@ class BackendService extends ChangeNotifier {
     }
     probe.dispose();
 
-    // ② 找工程根目录和 uv
+    return switch (mode) {
+      BackendMode.embedded => _startEmbedded(timeout),
+      BackendMode.external => _startExternal(timeout),
+    };
+  }
+
+  // ── 嵌入模式 ──────────────────────────────────────────────────────
+
+  /// 把 Python 拉在**本进程**里。
+  ///
+  /// 只做三件事：算好数据目录、把环境变量传进去、等端口通。
+  /// 业务代码一行不碰——Python 侧 `app/python/main.py` 负责其余全部。
+  Future<bool> _startEmbedded(Duration timeout) async {
+    message = '正在启动内置后端…';
+    _notify();
+
+    // 数据目录由**这边**解析后显式传下去。
+    //
+    // 不能让 Python 自己按 cwd 推：宿主那句
+    // `Directory.current = <app-support>/data` 实测跟 Python 看到的
+    // `os.getcwd()` 对不上（原因在宿主侧）。推错的后果是用户的登录态和
+    // 下载记录"凭空消失"，而用户只会认为**数据丢了**。
+    late final String dataDir;
+    try {
+      final support = await getApplicationSupportDirectory();
+      dataDir = path.join(support.path, 'data');
+      await Directory(dataDir).create(recursive: true);
+    } catch (error) {
+      phase = BackendPhase.failed;
+      message = '拿不到数据目录：$error';
+      _log('[启动器] getApplicationSupportDirectory() 失败：$error');
+      _notify();
+      return false;
+    }
+
+    _log('[启动器] 模式：嵌入（Python 跑在本进程内）');
+    _log('[启动器] 数据目录：$dataDir');
+
+    try {
+      final error = await SeriousPython.run(
+        environmentVariables: <String, String>{
+          _kPortEnv: '$port',
+          _kDataDirEnv: dataDir,
+        },
+      );
+      // 返回非空表示 Python 那边报错了。**必须说出来**——否则表现只是
+      // "后端一直没起来"，这条线索就白丢了。
+      if (error != null && error.trim().isNotEmpty) {
+        _log('[启动器] 嵌入 Python 报告错误：$error');
+      }
+    } catch (error) {
+      phase = BackendPhase.failed;
+      message = '拉起内置后端失败：$error';
+      _log('[启动器] SeriousPython.run 抛异常：$error');
+      _notify();
+      return false;
+    }
+
+    pid = _ownPid;
+    _log('[启动器] Python 已拉起（同进程，PID $pid）');
+
+    final ready = await _waitReady(timeout);
+    if (ready) {
+      phase = BackendPhase.ready;
+      message = '后端已就绪（内置）';
+      _log('[启动器] 后端就绪');
+    } else {
+      phase = BackendPhase.failed;
+      message = '内置后端启动超时（${timeout.inSeconds} 秒）';
+      _log('[启动器] 等待就绪超时。上面的输出就是后端日志，先看那里。');
+    }
+    _notify();
+    return phase == BackendPhase.ready;
+  }
+
+  // ── 外挂模式 ──────────────────────────────────────────────────────
+
+  /// `uv run ipod-web` 起子进程。开发时用，也是出问题时的退路。
+  Future<bool> _startExternal(Duration timeout) async {
     final repo = _findRepoRoot();
     if (repo == null) {
       phase = BackendPhase.failed;
@@ -133,6 +254,7 @@ class BackendService extends ChangeNotifier {
       _notify();
       return false;
     }
+    _log('[启动器] 模式：外挂（uv 子进程）');
     _log('[启动器] 项目目录：${repo.path}');
 
     final uv = await _resolveUv();
@@ -144,7 +266,6 @@ class BackendService extends ChangeNotifier {
       return false;
     }
 
-    // ③ 拉起来
     message = '正在启动后端…';
     _notify();
 
@@ -200,7 +321,6 @@ class BackendService extends ChangeNotifier {
       return false;
     }
 
-    // ④ 等它就绪（就绪探测是极轻量的接口，设备没插也能通）
     final ready = await _waitReady(timeout);
     if (ready) {
       phase = BackendPhase.ready;
@@ -230,9 +350,23 @@ class BackendService extends ChangeNotifier {
 
   // ── 停止 ──────────────────────────────────────────────────────────
 
-  /// 停掉后端。**杀整棵树**，不是杀单个 PID——见文件开头的说明。
+  /// 停掉后端。
+  ///
+  /// **嵌入模式下停不掉，这是事实，就直说。** Python 跑在本进程的线程里，
+  /// 而 `SeriousPython.terminate()` 在 Windows 上是**空实现**（平台接口里
+  /// 写着 `// nothing to do`，windows 实现也没覆写它）。硬说"已停止"会让
+  /// 调试面板撒谎——用户按了停止、端口还通着，下次排查就往错的方向找。
   Future<void> stop() async {
     _stopping = true;
+
+    if (mode == BackendMode.embedded) {
+      phase = BackendPhase.stopped;
+      message = '内置后端随应用一起退出';
+      _log('[启动器] 嵌入模式下后端跑在本进程里，停不了——退出应用才是真的停。'
+          '（想单独重启后端：设 IPOD_MANAGER_EXTERNAL_BACKEND=1 走外挂模式）');
+      _notify();
+      return;
+    }
 
     // 复用的那个不是我们拉起来的，不该由我们杀掉
     if (reused && _process == null) {
@@ -266,10 +400,31 @@ class BackendService extends ChangeNotifier {
 
   /// 重启后端。设置页的调试面板用——改了设置、或者后端卡住时，一键重来。
   ///
-  /// **复用来的后端会先"断开"再重新探测**：如果它是外部启动的，
+  /// **嵌入模式下做不到**，理由同 `stop()`。这里明确失败并说清怎么绕，
+  /// 而不是假装重启了（那会让调试面板成为误导源）。
+  ///
+  /// 外挂模式下**复用来的后端会先"断开"再重新探测**：如果它是外部启动的，
   /// stop() 不会去杀它，于是 restart 会重新探测到它并复用（这是对的，
   /// 我们本来就不该杀别人的进程）。
   Future<bool> restart() async {
+    if (mode == BackendMode.embedded) {
+      _log('[启动器] 嵌入模式无法单独重启后端（Python 在本进程里）。'
+          '请重启应用；需要频繁重启 Python 就用 IPOD_MANAGER_EXTERNAL_BACKEND=1。');
+      // 还能探测一下：端口通就说明它其实活着，别让用户以为坏了
+      final client = _probe;
+      final alive = await client.health();
+      client.dispose();
+      if (alive) {
+        phase = BackendPhase.ready;
+        message = '后端在跑（内置后端不能单独重启，要重启请退出应用）';
+      } else {
+        phase = BackendPhase.failed;
+        message = '内置后端没有响应，请退出应用重开';
+      }
+      _notify();
+      return alive;
+    }
+
     _log('[启动器] 用户请求重启后端');
     await stop();
     reused = false;
@@ -312,7 +467,7 @@ class BackendService extends ChangeNotifier {
     return false;
   }
 
-  // ── 环境与路径 ────────────────────────────────────────────────────
+  // ── 环境与路径（只有外挂模式用）────────────────────────────────────
 
   /// 子进程的环境变量。
   ///

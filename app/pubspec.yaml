@@ -36,6 +36,17 @@ dependencies:
   cupertino_icons: ^1.0.8
   http: ^1.6.0
   provider: ^6.1.5+1
+
+  # 把后端 Python 嵌进本进程跑，替掉"找 uv / 起子进程 / 杀进程树"那一套。
+  # 用户因此不需要装 uv，发行包也解压即用。见 lib/services/backend.dart。
+  # 开发时想改 Python 就重启后端：设 IPOD_MANAGER_EXTERNAL_BACKEND=1 走外挂模式。
+  serious_python: ^4.7.0
+  # 拿应用支持目录——嵌入模式的数据目录就落在它下面（登录态、下载记录、
+  # 作业日程）。**不能靠 cwd 推**，理由见 backend.dart 里 _startEmbedded。
+  path_provider: ^2.1.5
+  # 拼数据目录路径。serious_python 间接带进来了，但直接 import 就要直接声明，
+  # 否则 analyze 会报 depend_on_referenced_packages。
+  path: ^1.9.1
 dev_dependencies:
   flutter_test:
     sdk: flutter
