@@ -12,10 +12,10 @@ from ipod_cli.ncm.server import _redact
 class TestRedact:
     def test_cookie_is_masked(self) -> None:
         line = ("[INFO] Request Success: [eapi] /playlist/track/all?id=2698052064"
-                "&cookie=MUSIC_A_T=1551880948916; MUSIC_R_T=1552103572190")
+                "&cookie=MUSIC_A_T=1111111111; MUSIC_R_T=2222222222")
         out = _redact(line)
-        assert "MUSIC_A_T=1551880948916" not in out
-        assert "1552103572190" not in out
+        assert "MUSIC_A_T=1111111111" not in out
+        assert "2222222222" not in out
         assert "<已隐去>" in out
         # 有用的部分要留着，不然日志没意义了
         assert "/playlist/track/all" in out and "2698052064" in out
@@ -41,10 +41,10 @@ class TestRedact:
         """拿实测见过的那种行跑一遍：cookie 必须**完全**消失。"""
         line = (
             "23:39:06  INFO  ipod_web  [INFO] Request Success: [eapi] "
-            "/playlist/track/all?id=2698052064&cookie=MUSIC_A_T=1551880948916;"
+            "/playlist/track/all?id=2698052064&cookie=MUSIC_A_T=1111111111;"
             "+Max-Age=2147483647;+Expires=Thu,+07+Oct+2094+15:54:47+GMT;+Path=/eapi/clientlog;"
-            ";MUSIC_R_T=1552103572190;+Max-Age=2147483647"
+            ";MUSIC_R_T=2222222222;+Max-Age=2147483647"
         )
         out = _redact(line)
-        for secret in ("1551880948916", "1552103572190"):
+        for secret in ("1111111111", "2222222222"):
             assert secret not in out, f"凭据泄漏进日志：{secret}"
