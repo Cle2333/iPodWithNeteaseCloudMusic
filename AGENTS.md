@@ -21,19 +21,41 @@ src/iopenpod/   裁剪自 iOpenPod（MIT）的内核 —— iTunesDB/ArtworkDB �
                 ★ 几乎原样搬运，**不要改这里**；要改请先读 THIRD_PARTY_NOTICES.md
 src/ipod_cli/   自写设备侧代码 + 网易云同步链路（ncm/）
 src/ipod_web/   FastAPI 后端，给桌面端用
+  paths.py      数据目录推导与迁移
 app/            Flutter 桌面端（Dart）
+  python/main.py    嵌入模式入口（serious_python 在独立线程里跑它）
+  lib/services/backend.dart  后端生命周期：嵌入（默认）/ 外挂（uv 子进程）
 tests/          pytest（真实网络一律不碰，靠 mock 传输层）
 app/test/       Flutter 测试
+tools/          开发脚本（构建 / 打包 / 自检 / 插件软链绕行 / 真机彩排 / 端口清理）
 docs/           技术文档
 ```
 
+## 后端形态：**嵌入**，不是子进程
+
+Release 版把 CPython 运行时 + 依赖 + 后端源码全打进 `ipod_manager.exe` 那个目录，
+Python 跑在**同一进程的一条线程**里（靠 `serious_python`）。后果：
+
+* 用户**不需要装 uv**，发行包解压即用、不需要联网初始化
+* **没有子进程** → 没有孤儿进程、没有端口残留、没有"杀整棵树"
+* 代价：包体大（zip 约 58 MB），且构建链变复杂（见 `release/打包说明.md`）
+
+开发时想让 Python 跑在单独进程（改后端代码免重编译）：
+
+```bash
+export IPOD_MANAGER_EXTERNAL_BACKEND=1
+uv run ipod-web --port 8765
+```
+
+`backend.dart` 两条路都留着，**改宿主层时两条都要照顾到**。
+
 ## 外部依赖与运行环境
 
-这个项目**不是自包含的**，跑起来要这几样（本机都已就位）：
+这个项目**在源码形态下不是自包含的**，跑起来要这几样（本机都已就位）：
 
 | 依赖 | 用途 | 位置 |
 | --- | --- | --- |
-| **uv** | 跑后端与测试 | 本机已装 |
+| **uv** | 跑后端与测试。**发行版不需要它**（Python 已嵌入 exe） | 本机已装 |
 | **Flutter** | 编译桌面端 | `C:\flutter` |
 | **Node.js** | 只为「从网易云下载」服务（见下） | 本机已装 |
 | **iPod 真机** | 同步目标 | 挂载为 `D:\`，`iPod_Control/` 在根目录 |
@@ -72,6 +94,14 @@ flutter test                     # 前端测试
 flutter analyze
 ```
 
+发行相关（改完后端或宿主层都要跑）：
+
+```bash
+uv run python tools/build_windows_release.py      # 构建（含嵌入 Python）
+uv run python tools/verify_embedded_release.py    # 自检：起进程 + 打接口
+uv run python tools/package_release.py            # 打 zip
+```
+
 **用 uv，不要 pip。** 本机 `python` 可能是别的 venv，`PYTHONPATH` 常被设成别的
 site-packages 导致依赖错位——跑脚本一律 `env -u PYTHONPATH`。
 
@@ -100,6 +130,19 @@ site-packages 导致依赖错位——跑脚本一律 `env -u PYTHONPATH`。
 | **界面文案全中文** | 包括报错、进度、表头。不要写英文再"汉化" |
 | **破坏性操作要确认** | 删歌/删文件必须先预览或确认；界面上已经这么做了，别绕过去 |
 
+### 4. 嵌入 Python 相关的坑（阶段 2 实测踩出来的）
+
+| 坑 | 说明 |
+| --- | --- |
+| **嵌入环境里没有 `__file__`** | `app/python/main.py` 第一行若用 `Path(__file__)` 会直接 `NameError`，而表现只是"后端一直没起来"。定位自身目录改用 `sys.path` 反查 |
+| **失败时不要 `sys.exit()`** | 嵌入解释器退出会把**整个 Flutter 应用**带下去（点开就闪退，连日志都看不到）。打印中文原因后停住线程，让宿主超时 |
+| **`SeriousPython.terminate()` 在 Windows 上是空实现** | 所以嵌入模式下"停止/重启后端"做不到——`backend.dart` 会**如实说**，别改成假装成功 |
+| **数据目录不能靠 cwd** | 宿主那句 `Directory.current = ...` 跟 Python 看到的 `os.getcwd()` 对不上。一律由 Dart 侧解析 `getApplicationSupportDirectory()` 后经环境变量显式传给 Python |
+| **三个 `SERIOUS_PYTHON_*` 环境变量要覆盖两步** | `package` 和 `flutter build` 必须在**同一 shell**里都看得到，否则 site-packages / app 根本不进 bundle，而构建**照样"成功"** |
+| **换 Python 版本必须 `flutter clean`** | 不然 `Lib/` 里混着别的版本的 `.pyc`，症状是 `ImportError: bad magic number in 'string'`：应用能起、Python 全无反应 |
+| **Windows 没开"开发者模式"就构建不了** | Flutter 要给插件建**符号链接**，需要管理员或开发者模式。`tools/fix_plugin_symlinks.py` 用 junction（不需要权限）绕过，`build_windows_release.py` 已自动调用。注意 `flutter pub get` 本身就会因此返回非零 |
+| **MSYS 路径会毁掉 pip 安装** | `/c/Users/...` 交给 Windows 原生程序会被当成 `C:\c\...`，依赖装到不存在的路径而构建"成功"。一律用 `C:/` 形式（`pwd -W`） |
+
 ## 认证与本地状态
 
 **不要往仓库里写任何令牌、cookie、账号信息。**
@@ -111,17 +154,31 @@ site-packages 导致依赖错位——跑脚本一律 `env -u PYTHONPATH`。
 
 ### 网易云登录态
 
-cookie 存在 **`.ncm/ncm.db`**，已 gitignore，因此：
+cookie 存在 **`ncm.db`**，已 gitignore。**位置有两处，取决于怎么跑**：
 
-* **它不随仓库走。** 换机器 / 重新 clone 后**必须重新扫码登录**，否则下载失败、
+| 怎么跑 | 数据在哪 |
+| --- | --- |
+| **发行版 / 嵌入模式**（默认） | `%APPDATA%\com.example\ipod_manager\data\.ncm\ncm.db` |
+| **命令行 / 外挂模式** | 你启动命令那个目录下的 `.ncm/ncm.db` |
+
+* **两处是独立的库。** 在一边下载的歌，另一边不会知道——排查"为什么它说没登录 /
+  说没下载"时**先确认问的是哪一个**。嵌入模式那份才是用户日常用的。
+* **它不随仓库走。** 换机器 / 重新 clone 后必须重新扫码登录，否则下载失败、
   歌单拉不到。这**不是代码坏了**，别去改代码。
-* `.ncm/` 里还有下载记录与作业日程（`.ncm/logs/jobs.jsonl`），删掉会丢历史。
+* `.ncm/` 里还有下载记录、歌曲缓存与作业日程（`.ncm/logs/jobs.jsonl`），
+  删掉会丢历史。
 * 多账号的 cookie 分开存（设置页支持切换账号）。
+* 嵌入模式的迁移逻辑（`src/ipod_web/paths.py`）只在**目标不存在**时从候选位置
+  复制一份过来，**不移动、不覆盖**——改那段代码时保住这两条语义，它们是
+  "用户数据不会凭空消失"的判据。
 
 ## 发行版
 
-见 `release/打包说明.md`（含目录结构、四个坑、验证清单）。
+一条命令出包，细节见 `release/打包说明.md`（含构建链、8 个坑、验证清单）。
 构建产物不进版本库。
+
+**发行包 = 构建产物 + 几个说明文件**——Python 运行时和源码都在里面了，
+不再有"组装源码"这一步，也不需要 `pyproject.toml` 与 exe 同级。
 
 ## 用 DeepSeek Harness (DSH) 维护
 
@@ -146,8 +203,9 @@ uv run pytest tests/ -q                 # 后端
 uv run ruff check src tests tools
 cd app && flutter test && flutter analyze
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4000   # api-enhanced 在不在（期望 200）
+uv run python tools/verify_embedded_release.py                   # 嵌入后端还能不能起（要已有构建产物）
 ```
 
-全绿 = 环境接上了。任何时候觉得「功能坏了」，**先确认 api-enhanced 在跑、
-`.ncm/` 里还有登录态**，再怀疑代码。
+全绿 = 环境接上了。任何时候觉得「功能坏了」，**先确认 api-enhanced 在跑、登录态
+在你以为的那个 `.ncm/` 里**（见上表，有**两处**），再怀疑代码。
 

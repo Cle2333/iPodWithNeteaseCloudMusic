@@ -84,30 +84,40 @@ iTunesDB 的二进制格式和校验签名是真正的技术壁垒：
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Flutter 桌面端（app/）                          │
-│  只渲染 + 交互，不做业务逻辑                       │
-└──────────────────┬──────────────────────────────┘
-                   │ HTTP 127.0.0.1:8765
-┌──────────────────▼──────────────────────────────┐
-│  FastAPI 后端（src/ipod_web/）                   │
-│  路由 + 全局单线程作业队列 + 缓存                  │
-│  ★ 所有碰外部世界的活走同一条队列                  │
-└──────┬────────────────────────────┬─────────────┘
-       │ 同进程直接调用（不是子进程）   │ HTTP localhost:4000
-┌──────▼──────────────┐    ┌────────▼────────────┐
-│ 同步内核             │    │ api-enhanced        │
-│ （src/ipod_cli/）    │    │ （Node，网易云 API） │
-└──────┬──────────────┘    └─────────────────────┘
-       │
-┌──────▼──────────────────────────────────────────┐
-│  iOpenPod 内核（src/iopenpod/）                  │
-│  iTunesDB / ArtworkDB 读写 + HASH58 签名         │
-└──────┬──────────────────────────────────────────┘
-       │ 文件系统（FAT32）
-┌──────▼──────────────────────────────────────────┐
-│  iPod Classic（挂载为盘符，如 D:\）             │
-└─────────────────────────────────────────────────┘
+│  ipod_manager.exe —— **一个进程**                │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │ Flutter 界面（Dart）                        │  │
+│  │ 只渲染 + 交互，不做业务逻辑                   │  │
+│  └──────────────────┬─────────────────────────┘  │
+│                     │ HTTP 127.0.0.1:8765        │
+│  ┌──────────────────▼─────────────────────────┐  │
+│  │ FastAPI 后端（Python，serious_python 嵌在    │  │
+│  │ 本进程的一条线程里）                          │  │
+│  │ 路由 + 全局单线程作业队列 + 缓存              │  │
+│  │ ★ 所有碰外部世界的活走同一条队列              │  │
+│  └──────┬─────────────────────────────────────┘  │
+│         │ 同进程直接调用                          │
+└─────────┼────────────────────────────────────────┘
+          │
+┌─────────▼───────────────┐   ┌─────────────────────┐
+│ 同步内核（src/ipod_cli/）│   │ api-enhanced        │
+└─────────┬───────────────┘   │ （Node，网易云 API） │
+          │                   │ localhost:4000      │
+┌─────────▼───────────────────┴─────────────────────┐
+│  iOpenPod 内核（src/iopenpod/）                    │
+│  iTunesDB / ArtworkDB 读写 + HASH58 签名           │
+└─────────┬─────────────────────────────────────────┘
+          │ 文件系统（FAT32）
+┌─────────▼─────────────────────────────────────────┐
+│  iPod Classic（挂载为盘符，如 D:\）                │
+└───────────────────────────────────────────────────┘
 ```
+
+**为什么 Python 是嵌进去的**：早期版本让界面起一个 `uv run ipod-web` 子进程，
+于是用户得先装 uv、首启要联网建 111 MB 的 venv、还要管"子进程杀没杀掉"。
+现在 Python 运行时随发行包分发、跑在同一进程的线程里——**解压双击就能用**，
+没有子进程也就没有孤儿进程和端口残留。代价是包大一些（约 58 MB 的 zip）。
 
 **为什么后端要单线程**：两个作业同时重写 iTunesDB 是数据损坏级风险；而且
 网易云的限速要求天然排斥并发。界面上连点十次下载，实际只有一个请求在飞。
@@ -126,11 +136,22 @@ iPod Classic 全代用 **HASH58** 签名，只需要设备 `SysInfo` 里的 Fire
 除了 CLI，还有一个 **Flutter 桌面应用**，把「网易云歌单 → 下载 → 同步进 iPod」
 这条链路做成了点点点。
 
+**下载即用**：从 [Releases](https://github.com/Cle2333/iPodWithNeteaseCloudMusic/releases)
+拿 `iPodWithNeteaseCloudMusic-v*-windows-x64.zip`，解压到任意位置，
+双击 `启动.bat`（或直接双击 `ipod_manager.exe`）。
+
+**不需要装 Python，不需要 uv，不需要联网初始化**——Python 运行时和后端代码
+都在包里（见上面的架构图）。只有「从网易云下载歌」需要你自己装
+[node](https://nodejs.org/)（它一百多兆，没打进包里）；没装 node 时其余功能照常可用。
+
+数据（登录态、下载记录、作业日程、歌曲缓存）在：
+
 ```
-app\build\windows\x64\runner\Debug\ipod_manager.exe
+%APPDATA%\com.example\ipod_manager\data\.ncm\
 ```
 
-双击即可。**后端由应用自动拉起**，不用先手动起 `ipod-web`。
+**从 v0.1.0 升级**：旧版把数据放在你运行命令的目录下的 `.ncm\` 里，新版不认那个
+位置。把旧 `.ncm\` 拷到上面这个路径即可，否则要重新扫码登录。
 
 四块界面：
 
@@ -211,10 +232,7 @@ iPod 上已经同步进去的歌**不受影响**——对话框里专门写明�
 ### 从源码跑
 
 ```bash
-# 后端（应用会自动拉，但也可以单独跑）
-uv run ipod-web --port 8765
-
-# 前端
+# 前端（后端默认是**嵌入**的，Python 已被打进 exe，不用另起）
 cd app
 export PUB_HOSTED_URL=https://pub.flutter-io.cn
 export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
@@ -223,9 +241,31 @@ flutter run -d windows
 
 国内必须走镜像：官方源约 0.2 MB/s，镜像是 17 MB/s。
 
+**想让 Python 跑在单独进程里**（改后端代码不想重编译，或者出问题时回退）：
+
+```bash
+export IPOD_MANAGER_EXTERNAL_BACKEND=1
+uv run ipod-web --port 8765       # 另开一个终端
+```
+
+app 会优先复用已经跑着的那个后端。这条路保留了"杀进程树""找 uv"那一整套逻辑，
+发行版里默认不用。
+
+**打发行包**：
+
+```bash
+uv run python tools/package_release.py --version 0.2.0
+uv run python tools/verify_embedded_release.py     # 打完一定自检一遍
+```
+
+细节见 `release/打包说明.md`——那里记着这条构建链上踩过的 7 个坑
+（环境变量要覆盖两步、换 Python 版本必须 clean、MSYS 路径会毁掉 pip 安装……）。
+
 ---
 
-## 安装
+## 安装（命令行用法 / 从源码开发）
+
+只想用 CLI 或者要改代码，才需要这一节。**桌面应用的发行版不需要装任何东西。**
 
 需要 Python 3.11+ 和 [uv](https://docs.astral.sh/uv/)。
 
@@ -435,13 +475,23 @@ src/ipod_cli/     自写的设备侧代码
   sync_cli.py      网易云命令行入口
   cli.py           设备命令行入口
 src/ipod_web/     FastAPI 后端
-                  路由 + 全局单线程作业队列 + 缓存，给桌面端用
+                   路由 + 全局单线程作业队列 + 缓存，给桌面端用
+  paths.py         数据目录推导与迁移（嵌入模式靠它保证"换启动方式不丢数据"）
 app/              Flutter 桌面端（Dart）
+  python/main.py   嵌入模式的入口：serious_python 在独立线程里跑它
+  lib/services/backend.dart
+                   后端生命周期：嵌入（默认）/ 外挂（uv 子进程）两种模式
 tests/            pytest：跑在 tmp 目录的虚拟 iPod 上，不碰真机也不碰真网络
                   app/test/ 是桌面端的 widget 测试
-tools/            开发辅助脚本：真机彩排、依赖分析、端口清理
+tools/            开发辅助脚本
+  assemble_python_app.py     把 src/ 摆成嵌入要的平铺布局
+  build_windows_release.py   一键构建（组装 → 装依赖 → flutter build）
+  verify_embedded_release.py 发行版自检
+  package_release.py         打发行 zip
+  fix_plugin_symlinks.py     Windows 没开"开发者模式"时的构建绕行
+  （另有：真机彩排、依赖分析、端口清理）
 docs/             技术文档
-release/          发行版打包流程与启动器
+release/          发行版打包流程与验证清单
 ```
 
 **这里故意不写文件数、行数、测试条数**——它们每次提交都会漂，写在文档里只会
@@ -456,6 +506,7 @@ release/          发行版打包流程与启动器
 | [mutagen](https://github.com/quodlibet/mutagen) | 读写 PC 端音频标签 | GPL-2.0 |
 | [pycryptodome](https://github.com/Legrandin/pycryptodome) | HASH58 派生密钥的 AES | BSD-2 |
 | [FastAPI](https://github.com/fastapi/fastapi) / [uvicorn](https://github.com/encode/uvicorn) | 桌面端后端 | MIT / BSD |
+| [serious-python](https://github.com/flet-dev/serious-python) | 把 CPython 运行时嵌进桌面应用（发行版因此不需要用户装 Python） | Apache-2.0 |
 | [Flutter](https://github.com/flutter/flutter) | 桌面端界面 | BSD-3 |
 | [ffmpeg](https://ffmpeg.org/) | 音频转码（外部命令，可选） | LGPL/GPL |
 
@@ -475,6 +526,7 @@ release/          发行版打包流程与启动器
 | [iPod 存储原理与 HASH58 签名](docs/iPod%20存储原理与%20HASH58%20签名.md) | iTunesDB/ArtworkDB 的二进制布局、校验签名怎么算、FAT32 写入要注意什么 |
 | [ipod-cli 精简版 iPod 工具](docs/ipod-cli%20精简版%20iPod%20工具.md) | 命令行工具的设计与用法 |
 | [iOpenPod 源码架构](docs/iOpenPod%20源码架构.md) | 上游项目结构与我裁掉了什么、为什么 |
+| [架构选型调研](docs/架构选型调研-单语言还是一体化.md) | "Flutter + Python 要不要改成一体的"——当时查了哪些方案、实测数据、为什么选嵌入 Python，以及**实际做出来的结果** |
 
 读的过程中如果发现文档和代码对不上——**以代码为准**，文档记录的是当时的事实。
 
