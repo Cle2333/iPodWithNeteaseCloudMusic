@@ -4,9 +4,9 @@
 播放列表、iPod 名字、已有曲目的封面、新曲目的封面、播放列表成员。
 """
 
-import os
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 

@@ -7,9 +7,9 @@
 能不能读出标题/艺人/专辑，以及能不能识别到内嵌封面。
 """
 
-import os
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 

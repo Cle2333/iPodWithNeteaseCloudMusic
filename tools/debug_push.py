@@ -1,8 +1,8 @@
 """直接跑一遍 push 的写入流程，拿完整堆栈（cmd_push 只打印了错误信息）。"""
 
-import os
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 from pathlib import Path

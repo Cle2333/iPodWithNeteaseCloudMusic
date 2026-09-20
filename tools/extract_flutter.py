@@ -5,9 +5,9 @@ Python 的 zipfile 更稳，而且能顺手报告进度——2GB 解压要一两
 没进度的话不知道是不是卡住了。
 """
 
-import os
 from __future__ import annotations
 
+import os
 import sys
 import time
 import zipfile
