@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2026 Cle2333
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+本项目的 `src/iopenpod/` 目录是从 iOpenPod 裁剪来的子集，版权归 iOpenPod
+作者所有，同样以 MIT 许可使用。详见 `THIRD_PARTY_NOTICES.md`。
+
+---
+
+## 使用限制（Usage Restrictions）
+
+除 MIT 许可的条款外，作者额外声明：
+
+* **本软件仅供学习与个人技术研究使用，禁止用于任何商业用途。**
+* **严禁用于盗版传播**：不得使用本工具分发、传播任何未经授权的音乐。
+* 本工具不提供、不内置、不分发任何音乐内容，也不绕过任何付费机制；
+  所有音乐均来自使用者自己的账号，且仅限该账号本就有权访问的内容。
+* 因使用本软件产生的一切后果由使用者自行承担，作者不承担任何责任。

@@ -1,0 +1,57 @@
+# 统一行尾符。
+#
+# 这个项目曾经 CRLF / LF 混在一起（161 个 LF、160 个 CRLF），结果是：
+# 用两种不同工具改同一个文件时，git 会把**整个文件**报成改动——
+# 一个 1392 行的文件里其实只改了 102 行，剩下的全是行尾符翻转。
+# diff 没法看，code review 没法做。
+#
+# 规则：仓库里一律存 LF，检出时按平台还原。工具的差异被 git 吸收掉。
+
+# 源码与文本
+*.py     text eol=lf
+*.dart   text eol=lf
+*.md     text eol=lf
+*.toml   text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.json   text eol=lf
+*.lock   text eol=lf
+*.sh     text eol=lf
+*.txt    text eol=lf
+.gitignore       text eol=lf
+.gitattributes   text eol=lf
+
+# Flutter 生成的 Windows 构建文件：**保持 CRLF**。
+# 不转成 LF 是有意的——这些文件由 MSVC 工具链消费，改动它们没有收益，
+# 而 Runner.rc / *.vcxproj 这类文件对行尾符敏感。写成显式规则，免得
+# 以后看到它们还是 CRLF 以为是漏网。
+*.cpp            text eol=crlf
+*.h              text eol=crlf
+*.rc             text eol=crlf
+*.manifest       text eol=crlf
+*.vcxproj        text eol=crlf
+*.vcxproj.filters text eol=crlf
+*.sln            text eol=crlf
+*.bat            text eol=crlf
+*.ps1            text eol=crlf
+
+# 许可与声明也用 LF，跟文档一致
+LICENSE                text eol=lf
+THIRD_PARTY_NOTICES.md text eol=lf
+
+# 二进制
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.mp3    binary
+*.flac   binary
+*.m4a    binary
+*.exe    binary
+*.dll    binary
+*.zip    binary
+*.tar    binary
+
+# uv.lock 由工具生成，避免合并冲突噪音
+uv.lock  merge=union
