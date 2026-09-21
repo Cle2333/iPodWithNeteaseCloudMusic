@@ -163,7 +163,8 @@ def execute_remove(
     # ── 3. 删文件 ────────────────────────────────────────────────────
     #
     # 数据库已经不含这些曲目了，所以文件删不掉也无所谓——最多留几个孤儿文件，
-    # 用户可以用 `ipod verify` 看到、`ipod verify --fix` 清掉。
+    # 用户可以跑一次设备修复（桌面端「iPod 音乐管理」→「数据库修复」）清掉：
+    # 它就是靠 scan_device 把这类孤儿扫出来再删的。
     total = len(plan.to_remove)
     for index, (track, path) in enumerate(
         zip(plan.to_remove, plan.file_paths, strict=True), start=1
@@ -180,26 +181,32 @@ def execute_remove(
             result.file_errors.append((str(path), str(exc)))
 
     # ── 4. 清掉空目录里遗留的残骸 ────────────────────────────────────
-    _prune_empty_music_dirs(Path(device.root))
+    prune_empty_music_dirs(Path(device.root))
     return result
 
 
-def _prune_empty_music_dirs(ipod_root: Path) -> None:
-    """删掉 Music 下的空子目录。
+def prune_empty_music_dirs(ipod_root: Path) -> int:
+    """删掉 Music 下的空子目录，返回删了几个。
 
     只删 ``F00`` 这类空目录；``Music`` 本身永远保留——有些固件会检查它是否存在。
+
+    **公开**：设备修复（``ipod_cli.repair``）清完孤儿文件后也要收一遍空目录，
+    两处必须用同一份实现——分成两份迟早会有一份忘了保留 ``Music`` 本身。
     """
     music = Path(ipod_root) / "iPod_Control" / "Music"
     if not music.is_dir():
-        return
+        return 0
+    removed = 0
     for child in music.iterdir():
         if not child.is_dir():
             continue
         try:
             if not any(child.iterdir()):
                 child.rmdir()
+                removed += 1
         except OSError:
             continue
+    return removed
 
 
 def summarize(plan: RemovePlan) -> str:

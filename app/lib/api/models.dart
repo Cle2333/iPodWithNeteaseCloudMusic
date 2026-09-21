@@ -600,6 +600,7 @@ class JobInfo {
     required this.percent,
     required this.error,
     required this.message,
+    required this.result,
     required this.items,
     required this.itemsDone,
     required this.itemsFailed,
@@ -626,6 +627,14 @@ class JobInfo {
   final double percent;
   final String error;
   final String message;
+
+  /// 作业的**原始结果字典**（后端自己定的形状）。
+  ///
+  /// 大多数作业的结果界面不关心（只看 state 和日志），但有些作业的**产物就在
+  /// 这里面**——「扫描设备」的结果是一个完整的问题清单，界面得拿它渲染。
+  /// 以前这里只挑了一个 `message` 出来，别的一律丢掉，于是"扫描"这类作业
+  /// 的结果根本没路传出去。
+  final Map<String, dynamic> result;
 
   /// 逐首歌的进度。只有下载/同步类作业会有。
   final List<JobItem> items;
@@ -679,6 +688,7 @@ class JobInfo {
       percent: _double(json['percent']),
       error: _str(json['error']),
       message: _str(result['message']),
+      result: result,
       items: _list(json['items'])
           .map((e) => JobItem.fromJson(_map(e)))
           .where((i) => i.index > 0)
@@ -691,6 +701,168 @@ class JobInfo {
       elapsed: _double(json['elapsed']).toInt(),
     );
   }
+}
+
+/// ── 设备修复（数据库与磁盘对不上）────────────────────────────────────
+///
+/// 三个类别各有独立的开关，因为清理**不可逆**：删文件、重写数据库都收不回来。
+/// 界面必须把每一类的数量、体积、样例摆出来，让用户逐项决定。
+
+/// 一个孤儿文件：磁盘上有、数据库不认。
+class RepairOrphan {
+  const RepairOrphan({
+    required this.name,
+    required this.rel,
+    required this.size,
+    required this.sizeText,
+  });
+
+  final String name;
+  final String rel;
+  final int size;
+  final String sizeText;
+
+  factory RepairOrphan.fromJson(Map<String, dynamic> json) => RepairOrphan(
+    name: _str(json['name']),
+    rel: _str(json['rel']),
+    size: _int(json['size']),
+    sizeText: _str(json['size_text']),
+  );
+}
+
+/// 一条断链记录：库里有、磁盘没文件（iPod 上显示得出来但播不了）。
+class RepairBrokenTrack {
+  const RepairBrokenTrack({
+    required this.id,
+    required this.title,
+    required this.artist,
+    required this.rel,
+    required this.sizeText,
+  });
+
+  /// iPod 的持久 ID。**字符串**——它是随机 64 位无符号数，
+  /// 超过 2^63-1 的当 int 收会静默溢出成负数。
+  final String id;
+  final String title;
+  final String artist;
+  final String rel;
+  final String sizeText;
+
+  factory RepairBrokenTrack.fromJson(Map<String, dynamic> json) =>
+      RepairBrokenTrack(
+        id: _str(json['id']),
+        title: _str(json['title']),
+        artist: _str(json['artist']),
+        rel: _str(json['rel']),
+        sizeText: _str(json['size_text']),
+      );
+}
+
+/// 一个类别（孤儿 / 断链 / 临时文件）。
+class RepairGroup {
+  const RepairGroup({
+    required this.count,
+    required this.bytes,
+    required this.sizeText,
+    required this.items,
+  });
+
+  final int count;
+  final int bytes;
+  final String sizeText;
+
+  /// 样例（后端只回前若干个，全列会刷一屏把重点冲掉）。
+  final List<Map<String, dynamic>> items;
+
+  bool get isEmpty => count == 0;
+
+  factory RepairGroup.fromJson(Map<String, dynamic> json) => RepairGroup(
+    count: _int(json['count']),
+    bytes: _int(json['bytes']),
+    sizeText: _str(json['size_text']),
+    items: _list(json['items']).map(_map).toList(growable: false),
+  );
+
+  List<RepairOrphan> get orphans =>
+      items.map(RepairOrphan.fromJson).toList(growable: false);
+
+  List<RepairBrokenTrack> get broken =>
+      items.map(RepairBrokenTrack.fromJson).toList(growable: false);
+
+  /// 临时文件那份只有名字。
+  List<String> get names =>
+      items.map((e) => _str(e['name'])).toList(growable: false);
+}
+
+/// 一次扫描的结果。
+class RepairScan {
+  const RepairScan({
+    required this.dbTracks,
+    required this.diskFiles,
+    required this.clean,
+    required this.summary,
+    required this.orphans,
+    required this.broken,
+    required this.strayTemp,
+  });
+
+  final int dbTracks;
+  final int diskFiles;
+
+  /// 三样都没有 —— 数据库和磁盘完全一致。
+  final bool clean;
+
+  /// 一句话摘要，直接可以显示。
+  final String summary;
+
+  final RepairGroup orphans;
+  final RepairGroup broken;
+  final RepairGroup strayTemp;
+
+  /// 有没有可以清理的东西（孤儿 / 临时文件）。断链记录单独一档，不在这里。
+  bool get hasFixable => !orphans.isEmpty || !strayTemp.isEmpty;
+
+  /// 有没有任何问题（含断链记录）。
+  bool get hasProblems => !clean;
+
+  factory RepairScan.fromJson(Map<String, dynamic> json) => RepairScan(
+    dbTracks: _int(json['db_tracks']),
+    diskFiles: _int(json['disk_files']),
+    clean: json['clean'] == true,
+    summary: _str(json['summary']),
+    orphans: RepairGroup.fromJson(_map(json['orphans'])),
+    broken: RepairGroup.fromJson(_map(json['broken'])),
+    strayTemp: RepairGroup.fromJson(_map(json['stray_temp'])),
+  );
+}
+
+/// 一次清理的结果。
+class RepairCleanResult {
+  const RepairCleanResult({
+    required this.cleaned,
+    required this.freedBytes,
+    required this.freedText,
+    required this.notes,
+  });
+
+  final int cleaned;
+  final int freedBytes;
+  final String freedText;
+
+  /// 每一类各做了什么（中文，直接显示）。
+  final List<String> notes;
+
+  factory RepairCleanResult.fromJson(Map<String, dynamic> json) =>
+      RepairCleanResult(
+        cleaned: _int(json['cleaned']),
+        freedBytes: _int(json['freed_bytes']),
+        freedText: _str(json['freed_text']),
+        notes: _list(json['kinds'])
+            .map(_map)
+            .map((k) => _str(k['note']))
+            .where((n) => n.isNotEmpty)
+            .toList(growable: false),
+      );
 }
 
 class JobsSnapshot {

@@ -266,7 +266,7 @@ def _check_files(
     if orphans:
         return Check(
             "文件对应", WARN,
-            f"{len(orphans)} 个孤儿文件（占空间，可用 verify --fix 清理）",
+            f"{len(orphans)} 个孤儿文件（占空间，可用「数据库修复」清理）",
             details,
         )
     return Check("文件对应", OK, "库与磁盘完全一致", details)

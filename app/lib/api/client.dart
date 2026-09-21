@@ -342,6 +342,41 @@ class ApiClient {
     return json['job_id']?.toString() ?? '';
   }
 
+  // ── 设备修复 ──────────────────────────────────────────────────────
+  //
+  // 扫描和执行是**两个独立的作业**：界面必须先把扫描结果摆给用户看、
+  // 用户勾了哪几类，才发第二个请求。清理请求里带的是**类别开关**，
+  // 不是"刚扫到的那批文件"——后端执行时会重新扫一遍再删，中间设备被
+  // 外部改动也不会删错。
+
+  /// 扫描设备。返回作业 id；结果在作业的 `result` 里（用 [job] 取）。
+  Future<String> repairScan() async {
+    final json = await _post('/api/repair/scan');
+    return json['job_id']?.toString() ?? '';
+  }
+
+  /// 清掉选中的类别。返回作业 id。
+  ///
+  /// 三个开关默认全 false —— 清理不可逆，必须调用方显式勾选。
+  Future<String> repairClean({
+    bool orphans = false,
+    bool strayTemp = false,
+    bool brokenRecords = false,
+  }) async {
+    final json = await _post(
+      '/api/repair/clean',
+      body: <String, dynamic>{
+        'orphans': orphans,
+        'stray_temp': strayTemp,
+        'broken_records': brokenRecords,
+      },
+    );
+    if (json['ok'] == false) {
+      throw ApiException(json['message']?.toString() ?? '修复请求被拒绝');
+    }
+    return json['job_id']?.toString() ?? '';
+  }
+
   // ── iPod 上的歌单管理 ──────────────────────────────────────────────
   //
   // 注意跟「歌单」页那些方法区分：这里动的是 **iPod 设备上**的播放列表结构，

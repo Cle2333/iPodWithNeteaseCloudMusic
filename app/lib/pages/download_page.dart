@@ -160,6 +160,21 @@ class _TaskTabState extends State<_TaskTab> {
         const SizedBox(height: 16),
         if (job.hasItems)
           _itemList(job)
+        else if (job.finished)
+          // ★ 已结束却没有逐首记录 —— **这是正常的**，不是"还没开始"。
+          //
+          // 逐首记录来自**下载**那一环。歌要是本地早就下好了，这次同步就
+          // 只做"写入 iPod"，一首都不下载，于是 items 是空的。以前这里
+          // 一律显示"还没开始下歌，稍等一下"，对一条**已经跑完**的同步说
+          // 这句话，用户会以为它卡住了或者没干活。
+          Notice(
+            icon: Icons.info_outline,
+            text: job.kind == 'sync'
+                ? '这次同步没有下载任何歌（歌都在本地了），直接写进了 iPod。\n'
+                  '逐首清单只在「下载」那一环产生；写入的进度看上面的进度条。'
+                : '这次任务没有逐首记录。\n失败的曲目会列在上面。',
+            color: StatusColors.idle,
+          )
         else
           const Notice(
             icon: Icons.hourglass_top,

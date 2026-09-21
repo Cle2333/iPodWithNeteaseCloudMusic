@@ -28,6 +28,7 @@ from ipod_web.routes import (
     jobs,
     library,
     playlists,
+    repair,
     settings,
     status,
 )
@@ -84,6 +85,7 @@ def create_app(ctx: WebContext | None = None) -> FastAPI:
     app.include_router(library.router)
     # iPod 上的歌单管理（跟 playlists.router 是两回事：那个是网易云在线歌单）
     app.include_router(ipod_playlists.router)
+    app.include_router(repair.router)
     app.include_router(jobs.router)
     app.include_router(debug.router)
 

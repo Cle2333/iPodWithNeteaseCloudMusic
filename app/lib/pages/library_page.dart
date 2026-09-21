@@ -29,6 +29,7 @@ import '../format.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 import '../widgets/context_menu.dart';
+import '../widgets/repair_dialog.dart';
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({super.key});
@@ -476,6 +477,18 @@ class _LibraryPageState extends State<LibraryPage> {
       _toast(e.toString(), error: true);
     }
   }
+
+  /// 打开「数据库修复」：扫出数据库与磁盘对不上的地方，用户勾选后清理。
+  ///
+  /// 干净地收尾很重要：只有**真的动过手**才刷新列表，否则用户只是打开看一眼
+  /// 也会触发一次全量重读（几百首要读标签，白等）。
+  Future<void> _repair() async {
+    final changed = await showRepairDialog(context, _api);
+    if (!mounted || !changed) return;
+    _toast('修复完成，正在重新读取设备…');
+    await _load();
+  }
+
 
   void _toast(String message, {bool error = false}) {
     if (!mounted) return;
@@ -949,6 +962,14 @@ class _LibraryPageState extends State<LibraryPage> {
             icon: const Icon(Icons.monitor_heart_outlined, size: 16),
             label: const Text('健康检查'),
             onPressed: busy ? null : _verify,
+          ),
+          const SizedBox(width: 8),
+          // 「健康检查」告诉你**哪儿不对**，「数据库修复」负责**把它修好**。
+          // 两个挨着放：看完报告正好顺手修。
+          OutlinedButton.icon(
+            icon: const Icon(Icons.build_outlined, size: 16),
+            label: const Text('数据库修复'),
+            onPressed: busy ? null : _repair,
           ),
           const SizedBox(width: 8),
           FilledButton.icon(

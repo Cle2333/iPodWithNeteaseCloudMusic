@@ -571,5 +571,46 @@ void main() {
       expect(find.text('写入 iPod'), findsNothing);
       expect(find.textContaining('没有进度信息'), findsNothing);
     });
+
+    testWidgets('★ 跑完了但没逐首记录：不能说"还没开始下歌"', (tester) async {
+      // 主路径就是这样：歌早就下到本地了，这次同步只做"写入 iPod"，
+      // 一首都不下载 → items 为空。以前这里一律显示"还没开始下歌，
+      // 稍等一下就有清单了"——对一条**已经跑完**的同步说这句话，
+      // 用户会以为它卡住了或者根本没干活。
+      await pumpDownload(
+        tester,
+        fakeApi(
+          jobs: <Map<String, dynamic>>[
+            job(
+              kind: 'sync',
+              title: '同步「喜欢的音乐」',
+              state: 'done',
+              stateText: '已完成',
+              stage: '重建数据库并签名',
+              elapsed: 96,
+            ),
+          ],
+        ),
+      );
+
+      expect(find.textContaining('这次同步没有下载任何歌'), findsOneWidget);
+      expect(
+        find.textContaining('还没开始下歌'),
+        findsNothing,
+        reason: '已经跑完的作业不该被说成"还没开始"',
+      );
+    });
+
+    testWidgets('真还没开始：保留"稍等一下"的说法', (tester) async {
+      await pumpDownload(
+        tester,
+        fakeApi(
+          jobs: <Map<String, dynamic>>[
+            job(kind: 'sync', state: 'running', stateText: '进行中', stage: '读取歌单'),
+          ],
+        ),
+      );
+      expect(find.textContaining('还没开始下歌'), findsOneWidget);
+    });
   });
 }
