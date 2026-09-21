@@ -611,9 +611,13 @@ class _PlaylistDetailState extends State<_PlaylistDetail> {
                           Text(
                             '共 ${songs.total} 首'
                             '${songs.filter == SongFilter.all ? '' : '（当前筛选 ${songs.filtered} 首）'}'
-                            ' · 未下载 ${songs.pending}'
-                            ' · 已下载 ${songs.downloaded}'
-                            ' · 已同步 ${songs.onIpod}',
+                            // ★ 两个维度分开报，不再混成三个互斥的桶。
+                            //   混着报的时候，界面上永远看不出"设备上有、
+                            //   本地没留"这种情况——而那正是要重新下的那批。
+                            ' · 本地：已下 ${songs.localOk}'
+                            ' / 缺 ${songs.localMissing}'
+                            ' · iPod：'
+                            '${songs.deviceUnknown ? '未插设备（状态未知）' : '已有 ${songs.onIpod} / 缺 ${songs.offIpod}'}',
                             style: TextStyle(
                               fontSize: 12,
                               color: scheme.onSurfaceVariant,
@@ -799,7 +803,22 @@ class _PlaylistDetailState extends State<_PlaylistDetail> {
                   ),
                 ),
                 const SizedBox(width: 10),
-                StatusBadge(song.statusText, status: song.status),
+                // ★ 两个维度各给一个徽章，不再合成一个词。
+                //   以前合成"已同步"，于是"设备上有、本地没留"的歌看起来
+                //   不用管——其实点「下载到本地」时它有活干。
+                StatusBadge(
+                  song.localText,
+                  status: song.local ? 'downloaded' : 'pending',
+                ),
+                const SizedBox(width: 6),
+                StatusBadge(
+                  song.deviceText,
+                  status: switch (song.device) {
+                    'on_ipod' => 'on_ipod',
+                    'off_ipod' => 'off_ipod',
+                    _ => 'unknown',
+                  },
+                ),
               ],
             ),
             onTap: song.selectable ? () => _toggle(song.id) : null,
@@ -811,43 +830,63 @@ class _PlaylistDetailState extends State<_PlaylistDetail> {
 
   /// 一首歌的右键菜单。
   ///
-  /// 已经进 iPod 的行把下载/同步置灰并写明原因——菜单里直接不显示的话，
-  /// 用户会以为"这个功能没有"，而不是"这首不用处理"。
+  /// ★ **每个动作只看自己那一维**，判据和理由都是分开的：
+  ///
+  /// * 「下载到本地」只看本地文件在不在 —— 跟 iPod 上有没有**无关**。
+  /// * 「同步这一首到 iPod」只看设备 —— 没插设备时置灰并说明，
+  ///   而不是含糊地说"没事可做"。
+  ///
+  /// 以前两个动作共用一个"两边都有了"的判据：一首歌只要在 iPod 上，
+  /// 「下载到本地」就跟着一起灰掉——用户明明本地没留文件，想下都点不了。
+  /// 这就是"未下载已同步就不能下载"那个 bug 的另一半。
+  ///
+  /// 置灰而不是隐藏：菜单里直接不显示的话，用户会以为"这个功能没有"，
+  /// 而不是"这首不用处理"。
   List<SongAction> _menuFor(SongRow song) {
-    // 「没事可做」只有一种情况（两边都有了），措辞三处共用——
-    // 改文案只改这一个地方
-    final busy = song.selectable ? null : '本地也留着一份，两边都有了';
+    // 本地这一维：本地有文件 = 下载没事可做
+    final localDone = song.local ? '本地也留着一份' : null;
+    // 设备这一维：设备上有 = 同步没事可做；判断不了 = 同步做不了
+    final String? deviceDone;
+    if (!song.deviceKnown) {
+      deviceDone = '没插 iPod，判断不了它上面有没有';
+    } else if (song.onIpod) {
+      deviceDone = 'iPod 上已经有了';
+    } else {
+      deviceDone = null;
+    }
     return <SongAction>[
       SongAction(
         label: '下载到本地',
         icon: Icons.download_outlined,
-        onTap: song.selectable
-            ? () => _start(
+        onTap: song.local
+            ? null
+            : () => _start(
                 push: false,
                 wholePlaylist: false,
                 onlyIds: <int>[song.id],
-              )
-            : null,
-        unavailableReason: busy,
+              ),
+        unavailableReason: localDone,
       ),
       SongAction(
         label: '同步这一首到 iPod',
         icon: Icons.sync,
-        onTap: song.selectable
-            ? () => _start(
+        onTap: deviceDone != null
+            ? null
+            : () => _start(
                 push: true,
                 wholePlaylist: false,
                 onlyIds: <int>[song.id],
-              )
-            : null,
-        unavailableReason: busy,
+              ),
+        unavailableReason: deviceDone,
       ),
       SongAction(
         label: _isSelected(song) ? '取消勾选' : '勾选这一首',
         icon: Icons.check_box_outlined,
         dividerBefore: true,
+        // 勾选的意义是"接下来处理它"。两个维度各说各的：
+        // 只要**有任何一边还缺**，勾上就有意义。
         onTap: song.selectable ? () => _toggle(song.id) : null,
-        unavailableReason: busy,
+        unavailableReason: song.selectable ? null : '本地和 iPod 上都有了',
       ),
       SongAction(
         label: '删除本地那份',

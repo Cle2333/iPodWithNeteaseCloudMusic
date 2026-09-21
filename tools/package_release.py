@@ -6,7 +6,7 @@
 Python 运行时 + 依赖 + 源码全都进了 `ipod_manager.exe` 那个目录：
 
     iPodWithNeteaseCloudMusic-v0.2.0-windows-x64/
-    ├── 启动.bat               ← 双击这个（不再检查 uv）
+    └── 使用说明.txt           ← 给用户看的说明
     ├── 使用说明.txt
     ├── ipod_manager.exe
     ├── Lib/ site-packages/ app/ DLLs/     ← 嵌入的 Python（构建产物，原样带）
@@ -49,22 +49,6 @@ NAME = "iPodWithNeteaseCloudMusic"
 REQUIRED = ("ipod_manager.exe", "Lib", "site-packages", "app", "DLLs", "data")
 
 
-def launcher_bat() -> str:
-    """启动器。
-
-    内容故意保持很短：**所有运行环境（Python、node、网易云 API）都在包里**，
-    所以没有"检查依赖"这一步可做——检查不存在的依赖比不检查更糟，用户会以为
-    装漏了。剩下的只有"用 start 脱离本窗口启动"这一件事。
-    """
-    return """@echo off
-chcp 936 >nul
-title iPod 音乐管理器
-cd /d "%~dp0"
-
-rem 用 start 脱离本窗口，这样关掉黑窗口不会把应用一起关掉
-start "" "ipod_manager.exe"
-exit /b 0
-"""
 
 
 def readme_txt(version: str) -> str:
@@ -79,7 +63,7 @@ def readme_txt(version: str) -> str:
 ============================================================
 怎么用
 ============================================================
-1. 双击「启动.bat」（或直接双击 ipod_manager.exe）
+1. 双击 ipod_manager.exe
 2. 第一次打开请到「设置」页登录网易云账号（扫码登录）
 3. 插上 iPod，等它出现在「此电脑」里
 4. 到「歌单」页挑歌 → 下载 → 同步到 iPod
@@ -96,6 +80,23 @@ def readme_txt(version: str) -> str:
 
 备份这个 data 目录就等于备份全部状态。
 （iPod 上的歌和这个无关，那是直接写进 iPod 的。）
+
+听着低音失真 / 破音？
+------------------------------------------------------------
+多半是**音源本身**就这样，跟本工具无关。
+
+网易云上相当多的曲目（尤其华语流行）母带被压得很狠，真峰值超过 0 dBTP
+（= 已经削波），响度常在 -7 ~ -13 LUFS。这种失真从下载那一刻就存在了。
+
+无损会比 320k "好一点"是正常的：两者是同一个削过的母带，无损是原样，
+320k 在它上面又压了一道有损编码，解码时的峰值过冲造成二次削波。
+
+可以做的：
+  1. 关掉 iPod 的「均衡器」和「Sound Check」——EQ 往低频加增益会削得更狠
+  2. 换个低频量少的耳机试试
+  3. 同一首歌在网易云上常有多个版本（原版/重制/不同专辑），换个版本可能就干净
+
+本工具不会动你的音频：mp3 / m4a / wav 是原样拷贝；flac 转成无损 ALAC。
 
 出问题时的日志也在这里：
 
@@ -182,9 +183,15 @@ def main() -> int:
         else:
             print(f"  ⚠ 缺 {src.name}（MIT 要求随分发附带）")
 
-    _write(dest / "启动.bat", launcher_bat(), "gbk")
+    # 这里**故意不放启动脚本**（曾经放过一个 启动.bat）。
+    # 它早期有实际用途：旧版要用户自己装 node，脚本负责检查并提示。
+    # 现在 Python / node / 网易云 API 全在包里，它只剩 `cd` + `start` 两句，
+    # 而这两句都不必要——exe 是 GUI 程序（Subsystem=2，双击不弹黑窗），
+    # 启动不依赖工作目录（后端用 exe 自己的路径定位资源），数据在 %APPDATA%。
+    # 实测：cwd 换成 C:\、清空所有 IPOD_MANAGER_* 环境变量，双击照样起。
+    # 别再加回来。多一个需要双击的文件，只会多一个"到底该点哪个"的问题。
     _write(dest / "使用说明.txt", readme_txt(args.version), "utf-8-sig")
-    print("  已写 启动.bat（GBK+CRLF）/ 使用说明.txt（UTF-8 BOM）")
+    print("  已写 使用说明.txt（UTF-8 BOM）")
 
     # ── 打 zip ──
     zip_path = OUT_ROOT / f"{folder}.zip"
@@ -202,7 +209,7 @@ def main() -> int:
     print(f"   zip  {zip_path}  {zip_path.stat().st_size / 1024 / 1024:.1f} MB  {files} 个文件")
     print()
     print("   下一步（**别跳过**）：")
-    print("     1. 解压 zip 到**别的路径**，双击 启动.bat 试一次")
+    print("     1. 解压 zip 到**别的路径**，双击 ipod_manager.exe 试一次")
     print("     2. uv run python tools/verify_embedded_release.py --exe <解压路径>/ipod_manager.exe")
     return 0
 

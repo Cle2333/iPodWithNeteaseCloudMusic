@@ -808,6 +808,7 @@ class SongRow {
     required this.status,
     required this.onIpod,
     required this.local,
+    this.device = 'unknown',
   });
 
   final int id;
@@ -823,6 +824,9 @@ class SongRow {
   /// 本地那份下载文件还在（**核对过文件**，不是只看记录）。
   final bool local;
 
+  /// 设备这一维：`on_ipod` / `off_ipod` / `unknown`（没插设备，判断不了）。
+  final String device;
+
   /// 行上显示的文案。
   ///
   /// **两个维度分开说**：歌在 iPod 上、本地却已经删了，是再正常不过的状态，
@@ -833,12 +837,38 @@ class SongRow {
   /// 第四种情况（同步过、但本地那份已经删了）做成**后缀**而不是独立状态：
   /// 状态数保持三个，但不会把"本地没了"这件事藏起来——上一轮就因为
   /// 藏起来出过 bug（"删了本地想重下却提示已就绪"）。
+  /// 本地这一维的说法。
+  ///
+  /// ★ 两个维度**分开显示**，不再压成一个词。以前合成"已同步/已下载/未下载"，
+  /// 于是"设备上有、本地没留"被一个词盖住——界面上的「一键选中所有未下载的」
+  /// 永远选不到它，用户以为点下载没反应。现在徽章各说各的。
+  String get localText => local ? '本地已有' : '本地没有';
+
+  /// 设备这一维的说法。
+  ///
+  /// `unknown`（没插设备）**不等于**"不在设备上"。不知道就说不知道——
+  /// 以前没插设备时后端返回空集，界面把同步过的歌全标成未同步，
+  /// 用户以为白同步了。
+  String get deviceText => switch (device) {
+        'on_ipod' => 'iPod 上已有',
+        'off_ipod' => 'iPod 上没有',
+        _ => '未插 iPod', // unknown：不知道
+      };
+
+  /// 合并成一行的说法（给不区分维度的老地方用）。
   String get statusText {
+    if (device == 'unknown') {
+      if (local) return '本地已有 · 未插 iPod';
+      return '未下载 · 未插 iPod';
+    }
     if (onIpod && !local) return '已同步 · 本地无';
     if (onIpod) return '已同步';
     if (local) return '已下载';
     return '未下载';
   }
+
+  /// 设备状态可不可信（没插设备时为 false）。
+  bool get deviceKnown => device != 'unknown';
 
   /// 能不能勾选：**有活干**就能勾。
   ///
@@ -863,19 +893,24 @@ class SongRow {
       status: _str(json['status']),
       onIpod: _bool(json['on_ipod']),
       local: _bool(json['local']),
+      device: json['device'] == null ? 'unknown' : _str(json['device']),
     );
   }
 }
 
 /// 曲目列表的状态筛选。
 ///
-/// 三态就是用户要的三种：**未下载 / 已下载 / 已同步**。
+/// ★ 标签要把**维度**说清楚：前两个只看本地，第三个只看设备。
+/// 以前三个标签是"未下载 / 已下载 / 已同步"，看着像互斥的三态，
+/// 实际上"设备上有、本地没留"的歌既该算未下载、又算已同步——
+/// 用户就卡在这个自相矛盾上（"未下载已同步就不能下载"）。
+///
 /// `value` 保持不动——它是跟后端的协议，改标签不该动协议。
 enum SongFilter {
   all('all', '全部'),
-  pending('pending', '未下载'),
-  downloaded('downloaded', '已下载'),
-  onIpod('on_ipod', '已同步');
+  pending('pending', '本地未下载'),
+  downloaded('downloaded', '本地已下载'),
+  onIpod('on_ipod', 'iPod 上已有');
 
   const SongFilter(this.value, this.label);
 
@@ -900,6 +935,13 @@ class PlaylistSongs {
     required this.pending,
     required this.loading,
     required this.message,
+    this.localOk = 0,
+    this.localMissing = 0,
+    this.offIpod = 0,
+    this.deviceUnknown = false,
+    this.both = 0,
+    this.onIpodButNoLocal = 0,
+    this.localButNotOnIpod = 0,
   });
 
   final String playlist;
@@ -915,11 +957,40 @@ class PlaylistSongs {
 
   final SongFilter filter;
 
-  // 下面三个是**整单**的统计，不随筛选变——界面顶部要显示
-  // "共 246 首 · 未下载 243 · 已同步 3"。
+  // 下面这些是**整单**的统计，不随筛选变——界面顶部要显示。
+
+  // ── 本地这一维 ──
+  /// 本地文件确实在（核对过文件的）。
+  final int localOk;
+
+  /// 本地没有 —— **这就是"点下载有事可做"的那批**，跟设备无关。
+  final int localMissing;
+
+  // ── 设备这一维 ──
+  /// 真在设备上。
   final int onIpod;
-  final int downloaded;
+
+  /// 查过了，不在设备上。
+  final int offIpod;
+
+  /// ★ 没插设备（或库读不出来）——这一维**判断不了**。
+  ///
+  /// 有了这个标志，界面才能说"未插 iPod"而不是假装"都没同步"。
+  final bool deviceUnknown;
+
+  /// 两边都齐的（真的没事可做）。
+  final int both;
+
+  /// 设备上有、本地没留（该重新下到本地）。
+  final int onIpodButNoLocal;
+
+  /// 本地有、还没进设备（该同步）。
+  final int localButNotOnIpod;
+
+  // ── 以下三个是旧字段，语义已修正，留作兼容 ──
+  /// 未下载 = **本地没有**（跟设备无关）。
   final int pending;
+  final int downloaded;
 
   final bool loading;
   final String message;
@@ -943,6 +1014,17 @@ class PlaylistSongs {
       onIpod: _int(counts['on_ipod']),
       downloaded: _int(counts['downloaded']),
       pending: _int(counts['pending']),
+      localOk: counts['local_ok'] == null
+          ? _int(counts['downloaded'])
+          : _int(counts['local_ok']),
+      localMissing: counts['local_missing'] == null
+          ? _int(counts['pending'])
+          : _int(counts['local_missing']),
+      offIpod: _int(counts['off_ipod']),
+      deviceUnknown: _bool(counts['device_unknown']),
+      both: _int(counts['both']),
+      onIpodButNoLocal: _int(counts['on_ipod_but_no_local']),
+      localButNotOnIpod: _int(counts['local_but_not_on_ipod']),
       loading: _bool(json['loading']),
       message: _str(json['message']),
     );

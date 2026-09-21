@@ -26,8 +26,8 @@ from ipod_cli.ncm.sync import (
     execute_downloads,
     fetch_source_songs,
     plan_sync,
+    songs_on_device,
     sync_to_ipod,
-    synced_on_device,
 )
 from ipod_web.context import WebContext
 from ipod_web.deps import get_ctx
@@ -217,29 +217,52 @@ def playlist_songs(
     source = _source_of(ctx, playlist_id)
     tracks = _tracks_of(ctx, playlist_id, source)
 
-    synced = _synced_ids(ctx)
+    on_ipod, device_known = _device_ids(ctx, tracks)
     downloaded = ctx.store.downloaded_song_ids()
 
-    # counts 是**整单**的，不受筛选影响——界面要显示
-    # "共 246 首 · 未处理 243 · 已在 iPod 3"，那是整单的概况。
+    # ★ 两个维度**各自独立**统计，不再压成互斥的三态。
+    #
+    # 以前是 "on_ipod / downloaded / pending" 三个互斥桶，优先算设备：
+    # 一首歌只要在设备上就进 on_ipod 桶，**本地有没有文件被掩盖了**。
+    # 于是"设备上有、本地没留"的歌既不在"未下载"里（界面选不中），
+    # 点下载又确实该下它——用户看到的就是"未下载已同步却下不了"。
+    #
+    # 现在本地一维、设备一维分开数，四种组合各自有名字。
+    local_ok = sum(1 for t in tracks if t.id in downloaded)
     counts = {
-        "on_ipod": sum(1 for t in tracks if t.id in synced),
-        "downloaded": sum(
-            1 for t in tracks if t.id not in synced and t.id in downloaded
+        # ── 本地这一维（决定「下载」要不要做事）──
+        "local_ok": local_ok,
+        "local_missing": len(tracks) - local_ok,
+        # ── 设备这一维（决定「同步」要不要做事）──
+        "on_ipod": sum(1 for t in tracks if t.id in on_ipod) if device_known else 0,
+        "off_ipod": (
+            sum(1 for t in tracks if t.id not in on_ipod) if device_known else 0
         ),
-        "pending": sum(
-            1 for t in tracks if t.id not in synced and t.id not in downloaded
-        ),
-        # 已经在设备上、但本地那份已经没了。单独数出来：这部分用户
-        # 点「下载到本地」时**是会有事做的**，而以前会被算进"已就绪"。
+        #: 没插设备时为 True——界面据此说"设备状态未知"，而不是假装"都没同步"
+        "device_unknown": not device_known,
+        # ── 交叉：两边都齐 / 只有设备上有（本地丢了）/ 只有本地有 ──
+        "both": sum(1 for t in tracks if t.id in downloaded and t.id in on_ipod),
         "on_ipod_but_no_local": sum(
-            1 for t in tracks if t.id in synced and t.id not in downloaded
+            1 for t in tracks if t.id in on_ipod and t.id not in downloaded
         ),
+        "local_but_not_on_ipod": sum(
+            1 for t in tracks if t.id in downloaded and t.id not in on_ipod
+        ),
+        # ── 旧的键名保留（别的地方和测试还在用），语义已修正 ──
+        #: 「未下载」= 本地没有，**跟设备无关**。点「一键选中未下载的」
+        #: 选出来的就是这些——正是点「下载」时有活干的那批。
+        "pending": len(tracks) - local_ok,
+        "downloaded": local_ok,
     }
     counts["all"] = len(tracks)
 
     matched = [
-        t for t in tracks if status == "all" or _status_of(t.id, synced, downloaded) == status
+        t for t in tracks if status == "all" or _status_of(t.id, downloaded) == status
+    ] if status in ("all", "pending", "downloaded") else [
+        # on_ipod 这一档只有在设备可判断时才有意义
+        t
+        for t in tracks
+        if device_known and _device_state_of(t.id, on_ipod, device_known) == status
     ]
     if search.strip():
         matched = [t for t in matched if _matches_query(t, search)]
@@ -264,11 +287,14 @@ def playlist_songs(
                 "artist": song.artist_text,
                 "album": song.album,
                 "duration_ms": song.duration_ms,
-                "status": _status_of(song.id, synced, downloaded),
-                # 两个维度分开给。**合起来判断会掩盖"在 iPod 上但本地没留"**
-                # 这种情况——用户删了本地文件之后就靠它提醒自己。
-                "on_ipod": song.id in synced,
+                # status 现在只说本地这一维（pending / downloaded）。
+                # 界面的筛选下拉仍然用它——"未下载"就该是"本地没有"。
+                "status": _status_of(song.id, downloaded),
+                # ★ 两个维度各自成字段，界面**分别显示**。
                 "local": song.id in downloaded,
+                "device": _device_state_of(song.id, on_ipod, device_known),
+                # 兼容旧界面/旧测试
+                "on_ipod": song.id in on_ipod,
             }
             for song in window
         ],
@@ -296,13 +322,19 @@ def playlist_ids(
     source = _source_of(ctx, playlist_id)
     tracks = _tracks_of(ctx, playlist_id, source)
 
-    synced = _synced_ids(ctx)
+    on_ipod, device_known = _device_ids(ctx, tracks)
     downloaded = ctx.store.downloaded_song_ids()
 
     ids = [
         t.id
         for t in tracks
-        if status == "all" or _status_of(t.id, synced, downloaded) == status
+        if status == "all"
+        or (status in ("pending", "downloaded") and _status_of(t.id, downloaded) == status)
+        or (
+            status == "on_ipod"
+            and device_known
+            and t.id in on_ipod
+        )
     ]
     return {"playlist": source.name, "status": status, "ids": ids, "count": len(ids)}
 
@@ -371,13 +403,31 @@ def _load_tracks(
     return {"count": len(tracks), "request_count": client.request_count}
 
 
-def _synced_ids(ctx: WebContext) -> set[int]:
-    """真正在设备上的歌 ID。没插设备就当空集（界面只是不显示"已在 iPod"）。"""
+def _device_ids(ctx: WebContext, tracks: list[Any]) -> tuple[set[int], bool]:
+    """返回 ``(这批歌里真正在设备上的 ID, 设备是否可判断)``。
+
+    ★ 两件事都是这一版才对的：
+
+    **一、方向要对：拿歌去问设备，不是拿状态库去问设备。**
+
+    以前用的是 ``synced_on_device``：遍历状态库的同步记录逐条核对位置。
+    依赖错了——设备上有多少歌取决于我们**记过多少条**。实测用户前一天
+    导进 130 首，状态库里只有 10 条记录，界面上另外 120 首全显示
+    "iPod 上没有"。设备库就在那儿，问它就行。
+
+    **二、没插设备时要说"不知道"。**
+
+    以前返回空集，界面分不清"设备上没有"和"没插设备"，于是把已同步过的歌
+    全标成未同步，用户以为白同步了。现在返回 ``known=False``，界面显示
+    「未插设备」而不是撒谎。
+    """
     try:
         library = ctx.library()
     except DeviceNotFoundError:
-        return set()
-    return synced_on_device(ctx.store, library)
+        return set(), False
+    except Exception:  # noqa: BLE001 - 库读坏了也只影响"能不能判断"，不该 500
+        return set(), False
+    return songs_on_device(library, tracks, store=ctx.store), True
 
 
 def _matches_query(song: Any, needle: str) -> bool:
@@ -390,18 +440,42 @@ def _matches_query(song: Any, needle: str) -> bool:
     return needle.strip().lower() in text
 
 
-def _status_of(song_id: int, synced: set[int], downloaded: set[int]) -> str:
-    """三种状态：未下载 / 已下载 / 已同步。
+def _status_of(song_id: int, downloaded: set[int]) -> str:
+    """**只看本地这一维**：``downloaded`` / ``pending``。
+
+    ★ 以前这个函数先看设备、再看本地，返回三态（已同步 / 已下载 / 未下载）。
+    后果是"设备上有、本地没留文件"的歌被归进 ``on_ipod``，界面上的
+    「一键选中所有未下载的」**永远选不到它**——可点「下载」确实应该下它。
+    用户的原话："未下载已同步就不能下载"。那首歌明明两边都缺一半，
+    却被一个状态词盖住了。
+
+    现在两个维度各说各的：本地这一维用这个函数（决定"下载"要不要做事），
+    设备那一维用 :func:`_device_state_of`（决定"同步"要不要做事）。
+    互不影响，也就不会互相堵住。
 
     **没有"无版权"这一档**：要判断一首歌能不能下，得逐首问下载链接，
     每首 1~3 次请求——几百首的歌单根本不划算。真实的不可用由下载作业
     跑完之后报出来（那时候已经问过了，是顺带的）。
     """
-    if song_id in synced:
-        return "on_ipod"
-    if song_id in downloaded:
-        return "downloaded"
-    return "pending"
+    return "downloaded" if song_id in downloaded else "pending"
+
+
+#: 设备这一维的取值。
+#:
+#: ``unknown`` 是**独立的一档**，不是"没有"。没插 iPod、或者库读不出来的时候，
+#: 我们**不知道**这些歌在不在设备上——那就说不知道。
+#: 以前这里返回空集，等于宣称"设备上一首都没有"，是假话：界面会把已经同步过的
+#: 歌全标成"未同步/未下载"，用户以为白同步了。
+DEVICE_UNKNOWN = "unknown"
+DEVICE_ON = "on_ipod"
+DEVICE_OFF = "off_ipod"
+
+
+def _device_state_of(song_id: int, on_ipod: set[int], known: bool) -> str:
+    """设备这一维：在 / 不在 / 不知道。"""
+    if not known:
+        return DEVICE_UNKNOWN
+    return DEVICE_ON if song_id in on_ipod else DEVICE_OFF
 
 
 # ──────────────────────────────────────────────────────────────────────

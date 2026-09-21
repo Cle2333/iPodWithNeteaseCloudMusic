@@ -729,3 +729,172 @@ class TestLikedPlaylistId:
             lambda self, uid, cookie="": [Playlist(id=1, name="随便", track_count=1)],
         )
         assert client.liked_playlist_id(uid=1) == 0
+
+class Test设备核对按歌名兜底:
+    """★ 回归：数据库被重建后，同一个曲目会换一个文件位置。
+
+    iPod 上的文件名是随机的（``F01:CQRR.mp3``）。iTunes 同步过、设备恢复过
+    备份、或别的工具重导过之后，记录里的位置就失效了——**歌还是那首歌**。
+
+    只比位置的话，那些歌会被判成"没同步过"，下次同步再导一遍，
+    **歌就重复了**。实测踩到：真机 10 条记录只有 1 条位置对得上，而按
+    歌名 + 艺人查有 6 首确实在设备上。
+    """
+
+    def _track(self, location: str, title: str = "", artist: str = ""):
+        return SimpleNamespace(location=location, title=title, artist=artist)
+
+    def test_位置变了但歌名艺人对得上_仍算在设备上(self, store) -> None:
+        from ipod_cli.ncm.sync import synced_on_device
+
+        # 记录里的位置是旧的（数据库重建前），设备上现在叫别的名字
+        store.mark_synced(
+            1,
+            ipod_location=":iPod_Control:Music:F01:CQRR.mp3",
+            name="甲乙丙丁",
+            artist="李佳薇",
+        )
+
+        library = SimpleNamespace(tracks=[
+            self._track(":iPod_Control:Music:F07:ZZZZ.mp3", "甲乙丙丁", "李佳薇"),
+        ])
+
+        assert synced_on_device(store, library) == {1}, (
+            "位置对不上就判成没同步过——下次同步会把这首歌再导一遍，歌就重复了"
+        )
+
+    def test_艺人不同就不算同一首(self, store) -> None:
+        """保守一点：同名不同艺人不能当成同一首。"""
+        from ipod_cli.ncm.sync import synced_on_device
+
+        store.mark_synced(
+            1,
+            ipod_location=":iPod_Control:Music:F01:CQRR.mp3",
+            name="告别",
+            artist="甲",
+        )
+
+        library = SimpleNamespace(tracks=[
+            self._track(":iPod_Control:Music:F07:ZZZZ.mp3", "告别", "乙"),
+        ])
+
+        assert synced_on_device(store, library) == set()
+
+    def test_设备上真没有的仍然不算(self, store) -> None:
+        """兜底不能变成"什么都算有"——那会让该同步的歌永远进不去。"""
+        from ipod_cli.ncm.sync import synced_on_device
+
+        store.mark_synced(
+            1,
+            ipod_location=":iPod_Control:Music:F01:CQRR.mp3",
+            name="红色高跟鞋",
+            artist="某人",
+        )
+
+        library = SimpleNamespace(tracks=[
+            self._track(":iPod_Control:Music:F07:ZZZZ.mp3", "完全不同的歌", "别人"),
+        ])
+
+        assert synced_on_device(store, library) == set()
+
+    def test_没存歌名的老记录退回到只看位置(self, store) -> None:
+        """老记录里 name/artist 是空的，不能因此把设备上的歌全认成"同一首"。"""
+        from ipod_cli.ncm.sync import synced_on_device
+
+        store.mark_synced(1, ipod_location=":iPod_Control:Music:F01:CQRR.mp3")
+        library = SimpleNamespace(tracks=[
+            self._track(":iPod_Control:Music:F07:ZZZZ.mp3", "随便什么", "随便谁"),
+        ])
+
+        assert synced_on_device(store, library) == set()
+
+class Test从设备库出发判断:
+    """★ 回归：**设备上有多少歌，不能取决于状态库里记了多少条。**
+
+    以前走的是 ``synced_on_device``（遍历状态库的同步记录逐条核对设备位置）。
+    方向反了：设备上有多少歌，取决于我们记过多少条。
+
+    实测：用户前一天导进 130 首，状态库里只有 10 条记录，界面上另外 120 首
+    全部显示"iPod 上没有"——而设备库里有。用户的原话是：
+
+        "这个状态更新难道不是应该扫描 iPod 的数据库吗"
+
+    对，就该那样。所以改成 ``songs_on_device``：拿这批歌去问设备库。
+    """
+
+    def _track(self, title: str, artist: str, db_id: int = 1):
+        return SimpleNamespace(
+            title=title, artist=artist, db_track_id=db_id,
+            location=f":iPod_Control:Music:F00:{db_id}.mp3",
+        )
+
+    def _song(self, sid: int, name: str, artist: str):
+        return SimpleNamespace(id=sid, name=name, artist_text=artist)
+
+    def test_状态库里没有记录的歌_只要在设备上就算(self) -> None:
+        """★ 核心：没记过 ≠ 不在设备上。"""
+        from ipod_cli.ncm.sync import songs_on_device
+
+        library = SimpleNamespace(tracks=[
+            self._track("虚拟", "陈粒", db_id=7),
+            self._track("别的歌", "别人", db_id=8),
+        ])
+        songs = [self._song(1, "虚拟", "陈粒")]
+
+        # 注意：**不传 store**——状态库完全是空的，照样能判
+        assert songs_on_device(library, songs) == {1}
+
+    def test_同名不同艺人_算两首不同的歌(self) -> None:
+        """歌名一样但是翻唱，不能混为一谈。
+
+        实测数据里这种很多：歌单里"普通朋友"是宋雨琦，"天天"是刘大拿，
+        而设备上是陶喆的——只比歌名会把它们判成同一首，结果是
+        "该同步的歌被当成已在设备上，永远进不去"。
+        """
+        from ipod_cli.ncm.sync import songs_on_device
+
+        library = SimpleNamespace(tracks=[self._track("普通朋友", "陶喆")])
+        songs = [self._song(1, "普通朋友", "宋雨琦")]
+
+        assert songs_on_device(library, songs) == set()
+
+    def test_设备上没有的不会被算进来(self) -> None:
+        """兜底不能变成"什么都算有"——那会让该同步的歌永远进不去。"""
+        from ipod_cli.ncm.sync import songs_on_device
+
+        library = SimpleNamespace(tracks=[self._track("在的", "甲")])
+        songs = [self._song(1, "在的", "甲"), self._song(2, "不在的", "乙")]
+
+        assert songs_on_device(library, songs) == {1}
+
+    def test_空歌单和空设备都不炸(self) -> None:
+        from ipod_cli.ncm.sync import songs_on_device
+
+        empty = SimpleNamespace(tracks=[])
+        assert songs_on_device(empty, []) == set()
+        assert songs_on_device(empty, [self._song(1, "x", "y")]) == set()
+        assert songs_on_device(SimpleNamespace(tracks=[self._track("x", "y")]), []) == set()
+
+    def test_歌名被改过时靠状态库的位置认出来(self, store) -> None:
+        """位置是更确凿的证据：设备上那首的标签被改过，但文件是同一个。"""
+        from ipod_cli.ncm.sync import songs_on_device
+
+        store.mark_synced(
+            1, ipod_location=":iPod_Control:Music:F00:9.mp3",
+            name="旧名字", artist="旧艺人",
+        )
+        library = SimpleNamespace(tracks=[
+            self._track("新名字", "新艺人", db_id=9),   # location 是 ...:9.mp3
+        ])
+        songs = [self._song(1, "旧名字", "旧艺人")]
+
+        assert songs_on_device(library, songs, store=store) == {1}
+
+    def test_设备曲目自带_db_track_id_能直接拿来写歌单(self) -> None:
+        """写播放列表成员时用设备曲目自己的 id，不必绕状态库。"""
+        from ipod_cli.ncm.sync import device_track_index
+
+        library = SimpleNamespace(tracks=[self._track("虚拟", "陈粒", db_id=42)])
+
+        index = device_track_index(library)
+        assert index[("虚拟", "陈粒")].db_track_id == 42

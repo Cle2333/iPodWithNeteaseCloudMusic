@@ -464,7 +464,10 @@ class StateStore:
                 """,
                 (
                     song_id,
-                    str(path),
+                    # 存**相对数据目录**的路径（见 cache_path）。存绝对路径的话，
+                    # 数据目录一搬家（这件事真发生过：从"运行命令的目录"搬到
+                    # %APPDATA%）全部记录就都指错了。
+                    self.store_path(Path(path)),
                     level,
                     size,
                     name,
@@ -475,6 +478,57 @@ class StateStore:
                     _now(),
                 ),
             )
+
+    # ── 缓存文件路径 ──────────────────────────────────────────────
+
+    def cache_path(self, raw: str | Path) -> Path:
+        """把下载记录里的路径**解析成真正的位置**。
+
+        ★ 库里存的是**相对于数据目录**的路径（例如
+        ``.ncm/cache/123 歌名.mp3``）。这样数据目录整个搬走（从"运行命令的
+        那个目录"搬到 ``%APPDATA%``）之后，记录依然指得对。
+
+        **不能直接用 ``Path(raw)``**：那样相对路径是按**当前工作目录**解析的，
+        而工作目录是什么完全看用户从哪儿启动——发行版里就是解压出来的那个
+        目录。于是同一份记录，从开发目录启动能看到文件、从发行版目录启动
+        就"文件不存在"。实测踩到：用户装了新版本，歌单页全部显示"未下载"，
+        因为他那 7 首歌的缓存记录写的都是 ``.ncm/cache/…``。
+
+        绝对路径原样返回（老记录里可能有，也可能有用户手改的）。
+        """
+        p = Path(raw)
+        if p.is_absolute():
+            return p
+        return (self.data_dir() / p).resolve()
+
+    def data_dir(self) -> Path:
+        """状态库所属的**数据目录**（缓存、日志都在它下面）。
+
+        正常布局是 ``<数据目录>/.ncm/ncm.db``，所以取上两级；
+        不在 ``.ncm`` 里（测试、或用户自己指定的库路径）就取库所在那一级——
+        不能死板地往上跳两级，那会跳到别人家去。
+        """
+        parent = self.path.parent
+        return parent.parent if parent.name == ".ncm" else parent
+
+    def store_path(self, path: Path) -> str:
+        """入库前把路径转成**相对数据目录**的形式（能转就转）。
+
+        转不了的（比如用户把缓存指到别的盘）就存绝对路径——
+        至少不会因为工作目录变化而解析错。
+        """
+        p = Path(path)
+        # ★ 相对路径也要按**数据目录**补全，不能让 ``resolve()`` 拿工作目录去猜
+        #   ——那正是这个函数要修的病。写入和读取两边都得守同一条规矩，
+        #   只修一边的话，存进去的还是错的。
+        if not p.is_absolute():
+            p = self.data_dir() / p
+        p = p.resolve()
+        base = self.data_dir().resolve()
+        try:
+            return str(p.relative_to(base))
+        except ValueError:
+            return str(p)
 
     def cached_download(self, song_id: int) -> DownloadedFile | None:
         """取下载缓存——**会核对文件真的还在**。
@@ -487,9 +541,13 @@ class StateStore:
             ).fetchone()
         if row is None:
             return None
-        path = Path(row["path"])
+        path = self.cache_path(row["path"])
         if not path.is_file():
-            self.forget_download(song_id)
+            # ★ **不删记录**。以前这里（以及 downloaded_song_ids）会把"文件找不到"
+            # 当成"记录是脏的"直接删掉——可"找不到"也可能只是路径没解析对
+            # （实测就是这么丢掉 7 条记录的，文件其实好好的躺在缓存目录里）。
+            # 记录里的歌名/艺人/来源是有价值的元数据，删了就没了；
+            # 而"文件在不在"每次读的时候现查就行，不需要靠删记录来表达。
             return None
         return DownloadedFile(
             song_id=row["song_id"], path=path,
@@ -515,35 +573,46 @@ class StateStore:
         ``cached_download`` 就是 N 次查询——6000 首的歌单会卡住界面。
         一次查全更省事，反正这个集合本来就要全量。
 
-        ★ 以前这里直接返回全部记录，**含"记录在、文件不在"的脏记录**
-        （注释还说这是故意的，让 ``cached_download`` 去自我修正）。但后果是：
-        歌单页标着"已下载"、本地其实没有；而规划判断"要不要下"用的是
-        ``cached_download``（会核对文件）。两边不一致，用户看到的就是
-        自相矛盾——"它说已下载，怎么又去下了／怎么点下载没反应"。
+        ★ 逐条核对文件，但**不清记录**。
 
-        现在逐条核对，并把脏记录**顺手清掉**（自愈）：
-        一次 SELECT 拿路径、逐个 stat，最后一次性 DELETE 收尾。
+        以前这里（和 ``cached_download``）会把"文件找不到"的记录直接删掉，
+        当成自愈。那是**破坏性的**，实测踩到了：
+
+            记录里存的是相对路径 ``.ncm/cache/123 歌.mp3``，而相对路径是
+            按**当前工作目录**解析的。用户从发行版目录启动时，这条路径指向
+            发行版目录下——文件当然不在。于是七条好记录被当成脏数据删掉，
+            歌单页全部显示"未下载"，而文件其实好好地躺在缓存目录里。
+
+        判据错了就删数据，代价太大。现在只做过滤：
+        * 路径按**数据目录**解析（``cache_path``），不再看工作目录；
+        * 找不到文件就**不算已下载**，但记录留着——里面的歌名、艺人、
+          来源是有价值的元数据，删了就没了；
+        * 要清理记录有显式的 ``remove_downloads`` / ``clear_downloads``。
 
         代价是 N 次 stat，N = **已下载的曲目数**（几百），不是歌单长度
-        （几千）——可以接受。这也让"已下载"这个说法重新变得可信。
+        （几千）——可以接受。
         """
         with self._connect() as conn:
             rows = conn.execute("SELECT song_id, path FROM downloads").fetchall()
+        return {
+            int(row["song_id"])
+            for row in rows
+            if self.cache_path(row["path"]).is_file()
+        }
 
-        alive: set[int] = set()
-        stale: list[int] = []
-        for row in rows:
-            song_id = int(row["song_id"])
-            if Path(row["path"]).is_file():
-                alive.add(song_id)
-            else:
-                stale.append(song_id)
+    def missing_download_ids(self) -> set[int]:
+        """有下载记录、但**文件已经不在了**的歌 ID。
 
-        if stale:
-            # 一次性删除，不在循环里逐条开事务
-            self.remove_downloads(stale)
-
-        return alive
+        和 ``downloaded_song_ids`` 分开给：界面要能说"记录还在、文件丢了"，
+        而不是把两种情况混成"未下载"——那会让人以为从没下过。
+        """
+        with self._connect() as conn:
+            rows = conn.execute("SELECT song_id, path FROM downloads").fetchall()
+        return {
+            int(row["song_id"])
+            for row in rows
+            if not self.cache_path(row["path"]).is_file()
+        }
 
     def list_downloads(self) -> list[DownloadedFile]:
         """所有下载记录，**新的在前**。
@@ -559,7 +628,7 @@ class StateStore:
         return [
             DownloadedFile(
                 song_id=row["song_id"],
-                path=Path(row["path"]),
+                path=self.cache_path(row["path"]),
                 level=row["level"],
                 size=row["size"],
                 name=row["name"],
@@ -622,16 +691,26 @@ class StateStore:
     # ── 统计（前端要显示） ──────────────────────────────────────────
 
     def stats(self) -> dict[str, int]:
+        """给界面看的统计。
+
+        ``downloaded`` 是**文件确实还在的**数量，不是记录条数——界面上写
+        "已下载 N 首"就得是 N 首能播的。记录在、文件丢了的单独有个数
+        （``download_missing``），别把它混进"已下载"里骗人，也别把记录删了
+        假装它不存在。
+        """
+        present = len(self.downloaded_song_ids())
         with self._connect() as conn:
             synced = conn.execute("SELECT COUNT(*) AS n FROM synced_songs").fetchone()["n"]
-            downloaded = conn.execute("SELECT COUNT(*) AS n FROM downloads").fetchone()["n"]
+            records = conn.execute("SELECT COUNT(*) AS n FROM downloads").fetchone()["n"]
             accounts = conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()["n"]
             total_size = conn.execute(
                 "SELECT COALESCE(SUM(size), 0) AS n FROM synced_songs"
             ).fetchone()["n"]
         return {
             "synced": synced,
-            "downloaded": downloaded,
+            "downloaded": present,
+            "download_records": records,
+            "download_missing": records - present,
             "accounts": accounts,
             "synced_bytes": total_size,
         }

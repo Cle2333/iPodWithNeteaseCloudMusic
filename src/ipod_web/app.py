@@ -36,7 +36,7 @@ from ipod_web.routes import (
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 log = logging.getLogger("ipod_web")
 

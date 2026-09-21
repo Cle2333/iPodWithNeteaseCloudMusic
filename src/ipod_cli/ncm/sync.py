@@ -266,9 +266,15 @@ def plan_sync(
     # * 要 iPod 上有  → 设备上已经有了才跳过
     # * 只要本地有    → 本地文件已经在才跳过（iPod 有没有跟这无关）
     if target == TARGET_IPOD:
-        # 有设备库就对着设备核对；没有就退而信状态库（比如彩排/离线）
+        # 有设备库就**对着设备库核对**；没有就退而信状态库（比如彩排/离线）
+        #
+        # ★ 注意这里是 songs_on_device（拿这批歌去问设备），不是
+        #   synced_on_device（拿状态库的记录去问设备）。差别很实在：
+        #   后者只能确认"状态库里记过的"，而设备上那些**没记过**的歌
+        #   （从命令行、从旧版本、从别的数据目录导进去的）会被当成不存在，
+        #   下次同步再导一遍 → 歌重复。实测用户 130 首里有 120 首属于这类。
         synced = (
-            synced_on_device(store, library)
+            songs_on_device(library, songs, store=store)
             if library is not None
             else store.synced_ids()
         )
@@ -481,6 +487,90 @@ class IpodSyncOutcome:
         return self.bytes_copied / 1048576
 
 
+def _same_song_key(name: str, artist: str) -> tuple[str, str]:
+    """按"歌名 + 艺人"认一首歌（都归一化过）。
+
+    用它做兜底的身份判断：iPod 上的**文件名是随机的**（``F01:CQRR.mp3``），
+    一旦数据库被重建、或者歌被别的工具重新导入过，同一个文件位置的记录就
+    失效了——但歌还是那首歌。
+    """
+    return (name or "").strip().casefold(), (artist or "").strip().casefold()
+
+
+def device_track_index(library) -> dict[tuple[str, str], object]:
+    """设备库的 ``(歌名, 艺人) → 曲目`` 索引（都归一化）。
+
+    用它按名字找设备上的曲目——**曲目对象自己带着 ``db_track_id``**，
+    写播放列表成员时直接用它，不必绕道状态库。这一点很关键：从命令行、
+    从旧版本、或从别的数据目录导进去的歌，状态库里根本没有记录，
+    绕状态库的话这些歌永远进不了播放列表。
+    """
+    index: dict[tuple[str, str], object] = {}
+    for track in library.tracks:
+        key = _same_song_key(
+            getattr(track, "title", ""), getattr(track, "artist", "")
+        )
+        if key != ("", ""):
+            index.setdefault(key, track)
+    return index
+
+
+def songs_on_device(library, songs, *, store: StateStore | None = None) -> set[int]:
+    """这批歌里哪些**真的在这台 iPod 上**。
+
+    ★ **从设备数据库出发，不是从状态库出发。**
+
+    这里以前的方向是反的：遍历状态库的同步记录，逐条去设备上核对位置。
+    听起来合理，但有个致命的依赖——**设备上有多少歌，取决于我们记了多少条**。
+    实测踩到：用户前一天导进 130 首，状态库里只有 10 条记录，于是界面上
+    另外 120 首全部显示"iPod 上没有"，而去问设备的话它们明明都在。
+
+    现在反过来：拿这次要看的歌，去设备库的索引里查。设备库是设备自己的
+    数据库，不依赖我们记没记过——这才是"扫描 iPod 数据库"该有的样子。
+
+    两种命中信号，命中任一即算：
+
+    * **歌名 + 艺人**（都归一化）在设备库里有同名同艺人的曲目；
+    * 状态库里那条记录的 ``ipod_location`` 确实在设备库的位置集合里
+      （歌名被改过、或两边写法有出入时，位置是更确凿的证据）。
+
+    **不能只看歌名**：实测同一歌名在两边常常是不同的录音（翻唱/不同版本）。
+    例如歌单里的"普通朋友"是宋雨琦唱的，设备上那首是陶喆的；只比歌名会
+    把两个人的歌当成同一首，结果是"该同步的歌被判成已在设备上，永远进不去"。
+    """
+    wanted = {song.id: song for song in songs}
+    if not wanted:
+        return set()
+
+    locations = {track.location for track in library.tracks}
+    by_name: dict[tuple[str, str], list] = {}
+    for track in library.tracks:
+        key = _same_song_key(
+            getattr(track, "title", ""), getattr(track, "artist", "")
+        )
+        if key != ("", ""):
+            by_name.setdefault(key, []).append(track)
+
+    # 状态库里记过的位置（快路径 + 歌名对不上时的兜底）
+    state_locations: set[str] = set()
+    if store is not None:
+        for song_id in wanted:
+            record = store.synced_song(song_id)
+            if record and record.ipod_location:
+                state_locations.add(record.ipod_location)
+
+    out: set[int] = set()
+    for song_id, song in wanted.items():
+        key = _same_song_key(song.name, song.artist_text)
+        if key in by_name:
+            out.add(song_id)
+            continue
+        record = store.synced_song(song_id) if store is not None else None
+        if record and record.ipod_location in locations:
+            out.add(song_id)
+    return out
+
+
 def synced_on_device(store: StateStore, library) -> set[int]:
     """**真正**已经在这台设备上的网易云歌曲 ID。
 
@@ -490,14 +580,41 @@ def synced_on_device(store: StateStore, library) -> set[int]:
     "已在设备上"，汇总显示"要写入 0 首"（其实要写 3 首），
     播放列表还被算成 6 个成员（3 个是幽灵条目，最后靠写入器丢弃）。
 
-    所以要用 iPod 上**实际存在的文件位置**核对一遍。
-    状态库只是加速，设备才是真相。
+    所以要用 iPod 上**实际存在的曲目**核对一遍。状态库只是加速，设备才是真相。
+
+    ★ 核对分两步，**先看文件位置，再退到歌名 + 艺人**。
+
+    只比文件位置是不够的：iPod 上的文件名是随机的，数据库被重建（iTunes
+    同步过、设备恢复过备份、别的工具重导过）之后同一个曲目会换一个位置。
+    实测踩到：真机 130 首里，10 条同步记录只有 1 条位置对得上，而按歌名 +
+    艺人查**有 6 首确实在设备上**——那些歌会被判成"没同步过"，下次同步再导
+    一遍，**歌就重复了**。
+
+    先用位置（快、且是同一份文件的确证），对不上再按名字认——名字相同就是
+    同一首（同名同艺人的不同录音在这套流程里极少见，而"重复导入整张专辑"
+    是天天会发生的）。
     """
     locations = {track.location for track in library.tracks}
+
+    by_name: dict[tuple[str, str], int] = {}
+    for track in library.tracks:
+        key = _same_song_key(
+            getattr(track, "title", ""), getattr(track, "artist", "")
+        )
+        if key != ("", ""):
+            by_name.setdefault(key, 0)
+            by_name[key] += 1
+
     out: set[int] = set()
     for song_id in store.synced_ids():
         record = store.synced_song(song_id)
-        if record and record.ipod_location in locations:
+        if record is None:
+            continue
+        if record.ipod_location and record.ipod_location in locations:
+            out.add(song_id)
+            continue
+        # 位置对不上（数据库重建过、文件名变了）——按歌名 + 艺人再认一次
+        if by_name.get(_same_song_key(record.name, record.artist)):
             out.add(song_id)
     return out
 
@@ -595,12 +712,22 @@ def sync_to_ipod(
         if _looks_like_our_file(item.pc.source_path, song_by_path):
             track_ids.append(item.db_track_id)
 
-    on_device = synced_on_device(store, library)
+    wanted = [item.song for item in plan.items]
+    on_device = songs_on_device(library, wanted, store=store)
+    index = device_track_index(library)
     already = 0
     for item in plan.items:
         if item.song.id not in on_device:
             continue
-        db_id = _existing_db_track_id(store, item.song.id)
+        # ★ 优先用**设备曲目自己的 db_track_id**，状态库只作兜底。
+        #
+        # 状态库里没有这条记录时（命令行导的、旧版本导的、从别的数据目录
+        # 导的），以前这里直接 continue —— 于是那些歌虽然明明在设备上、
+        # 也不会进播放列表，用户看到的就是"同步完了但歌单里少了一大半"。
+        track = index.get(_same_song_key(item.song.name, item.song.artist_text))
+        db_id = getattr(track, "db_track_id", None) if track is not None else None
+        if not db_id:
+            db_id = _existing_db_track_id(store, item.song.id)
         if db_id:
             track_ids.append(db_id)
             already += 1

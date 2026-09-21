@@ -10,7 +10,7 @@ build/
 # 本地截图/调试产物，不进版本库
 .hermes/screenshot*.png
 
-# 发行构建产物：由 release/启动.bat 和 Flutter 构建生成，不进版本库
+# 发行构建产物：由 Flutter 构建生成，不进版本库
 release/*.zip
 release/iPodWithNeteaseCloudMusic-*/
 release/_测试.bat

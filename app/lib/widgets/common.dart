@@ -351,7 +351,10 @@ Color statusColor(String status) => switch (status) {
   'ok' || 'on_ipod' || 'add' => StatusColors.ok,
   'warn' || 'downloaded' || 'transcode' => StatusColors.warn,
   'fail' || 'error' => StatusColors.error,
-  'skip' => StatusColors.idle,
+  // 设备上没有 / 跳过：不是错误，只是没事可做，灰的
+  'skip' || 'off_ipod' => StatusColors.idle,
+  // 判断不了（没插设备）走默认的中性色 —— **不能跟"没有"同色**，
+  // 那会让人以为查过了
   _ => StatusColors.info,
 };
 

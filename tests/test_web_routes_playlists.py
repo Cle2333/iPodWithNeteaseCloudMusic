@@ -699,3 +699,159 @@ class TestSongSearch:
 
         assert data["total"] == 5
         assert data["counts"]["all"] == 5
+
+
+class Test两维状态分开:
+    """★ 回归：**本地**和**设备**是两个独立维度，而且"没插设备"不能假装成
+    "设备上一首都没有"。
+
+    用户的死结（原话）："不会出现未下载已同步就不能下载的 bug"。
+
+    以前 ``_status_of`` 先看设备再看本地，返回互斥三态。于是一首
+    "设备上有、本地没留文件"的歌被归进 on_ipod：界面上的「一键选中所有
+    未下载的」**永远选不到它**——可点「下载」确实该把它下下来。两边各缺
+    一半，却被一个状态词盖住了。
+
+    现在：本地这一维决定"下载"要不要做事，设备这一维决定"同步"要不要做事。
+    """
+
+    def _load(self, client, ctx, fake, patch) -> dict:
+        patch(ctx, fake)
+        client.get("/api/playlists")  # 让曲目进缓存
+        return client.get("/api/playlists/100/songs").json()
+
+    @pytest.fixture
+    def no_device(self, web_store, tmp_path):
+        """一个**明确没有设备**的 ctx。
+
+        ★ 不能靠"ipod_path=None"，那是**自动探测**——实测在开发机上它找到了
+        真插着的 iPod（D:\，130 首），于是"没插设备"这个前提根本不成立，
+        测试测的是另一回事。要测"判断不了"，就得给一个确定不存在的路径。
+        """
+        from ipod_web.context import WebContext
+        from ipod_web.jobs import JobManager
+
+        return WebContext(
+            store=web_store,
+            jobs=JobManager(),
+            ipod_path=str(tmp_path / "这里没有-iPod"),
+            cache_dir=tmp_path / "cache",
+        )
+
+    @pytest.fixture
+    def no_device_client(self, no_device):
+        from fastapi.testclient import TestClient
+
+        from ipod_web.app import create_app
+
+        with TestClient(create_app(no_device)) as c:
+            yield c
+
+    @pytest.fixture
+    def with_device(self, web_ctx, web_store, monkeypatch):
+        """让 ctx 表现得像"插着一台设备"，并让 1000 号歌真的在上面。
+
+        走真代码路径（``synced_on_device`` 拿库里的 location 去比），
+        不 mock 掉判断逻辑本身。
+        """
+        from types import SimpleNamespace
+
+        class _Lib:
+            tracks = [SimpleNamespace(location="F00/1000.mp3")]
+
+        monkeypatch.setattr(web_ctx, "library", lambda *a, **k: _Lib())
+        web_store.mark_synced(1000, ipod_location="F00/1000.mp3", db_track_id=42)
+        return web_ctx
+
+    # ── 没插设备：说实话 ──────────────────────────────────────────
+
+    def test_没插设备时说不知道而不是说没有(
+        self, no_device, no_device_client, fake_with_playlists, patch_clients
+    ) -> None:
+        data = self._load(
+            no_device_client, no_device, fake_with_playlists, patch_clients
+        )
+
+        assert data["counts"]["device_unknown"] is True
+        # ★ 以前这里返回空集 = 宣称"设备上一首都没有"，是假话；
+        #   界面于是把同步过的歌全标成未同步，用户以为白同步了。
+        assert all(s["device"] == "unknown" for s in data["songs"]), (
+            "设备不可判断时不该给每首歌编一个'不在设备上'"
+        )
+        assert data["counts"]["on_ipod"] == 0
+        assert data["counts"]["off_ipod"] == 0
+
+    def test_设备这一维不可判断时_on_ipod_筛选不撒谎(
+        self, no_device, no_device_client, fake_with_playlists, patch_clients
+    ) -> None:
+        self._load(no_device_client, no_device, fake_with_playlists, patch_clients)
+
+        data = no_device_client.get("/api/playlists/100/songs?status=on_ipod").json()
+        assert data["songs"] == [], "判断不了就不该'筛出'任何东西"
+        ids = no_device_client.get("/api/playlists/100/ids?status=on_ipod").json()["ids"]
+        assert ids == []
+
+    # ── ★ 死角本身 ───────────────────────────────────────────────
+
+    def test_设备上有但本地没留的歌_仍然算未下载(
+        self, with_device, web_client, web_store, fake_with_playlists, patch_clients
+    ) -> None:
+        """★★ 这就是用户踩的那个死角。
+
+        1000 号歌在设备上、本地**没有**文件。它必须出现在 pending 里，
+        因为点「下载」时确实有活干（要把本地那份下回来）。
+        """
+        cache_song(web_store, with_device.cache_dir, 1001)  # 这首两边都有
+        patch_clients(with_device, fake_with_playlists)
+        web_client.get("/api/playlists")  # 让曲目进缓存
+
+        data = web_client.get("/api/playlists/100/songs").json()
+        by_name = {s["name"]: s for s in data["songs"]}
+
+        assert by_name["通勤第0首"]["device"] == "on_ipod"
+        assert by_name["通勤第0首"]["local"] is False
+        assert by_name["通勤第0首"]["status"] == "pending", (
+            "设备上有不等于本地有；本地没有就该算未下载，否则下载入口会被堵"
+        )
+
+        counts = data["counts"]
+        assert counts["device_unknown"] is False
+        assert counts["on_ipod"] == 1
+        assert counts["on_ipod_but_no_local"] == 1
+        assert counts["local_ok"] == 1
+        assert counts["local_missing"] == 4
+        assert counts["pending"] == 4, "pending 只该看本地"
+        assert counts["both"] == 0, "1001 本地有但设备上没有，不该算两边都有"
+        assert counts["local_but_not_on_ipod"] == 1
+
+    def test_一键选中未下载的会带上设备上有本地没留的(
+        self, with_device, web_client, web_store, fake_with_playlists, patch_clients
+    ) -> None:
+        """★★ 死角回归：这首"设备上有、本地没留"的歌必须能被选出来。
+
+        以前它被算进 on_ipod 桶，一键选中永远选不到它 → 用户点下载没反应
+        → 只能一首一首手动勾。
+        """
+        cache_song(web_store, with_device.cache_dir, 1001)
+        patch_clients(with_device, fake_with_playlists)
+        web_client.get("/api/playlists")
+
+        ids = web_client.get("/api/playlists/100/ids?status=pending").json()["ids"]
+
+        assert 1000 in ids, "设备上有但本地没留的歌被漏掉了——这正是用户踩的死角"
+        assert 1001 not in ids, "本地已经有的不该在未下载名单里"
+
+    # ── 插着设备：设备这一维要准 ──────────────────────────────────
+
+    def test_插着设备时设备这一维是对的(
+        self, with_device, web_client, fake_with_playlists, patch_clients
+    ) -> None:
+        data = self._load(web_client, with_device, fake_with_playlists, patch_clients)
+
+        by_name = {s["name"]: s for s in data["songs"]}
+        assert by_name["通勤第0首"]["device"] == "on_ipod"
+        assert by_name["通勤第1首"]["device"] == "off_ipod"
+        assert data["counts"]["device_unknown"] is False
+
+        on = web_client.get("/api/playlists/100/songs?status=on_ipod").json()
+        assert [s["name"] for s in on["songs"]] == ["通勤第0首"]

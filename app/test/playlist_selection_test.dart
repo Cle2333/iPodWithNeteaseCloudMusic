@@ -29,6 +29,13 @@ import 'package:ipod_manager/theme.dart';
 /// 中间 `downloaded` 首是"已下载"，其余"未下载"。
 ///
 /// 分页按 [size] 切，status 筛选也在服务端做——跟真后端一致。
+/// 第 i 首本地有没有文件。
+///
+/// 在 iPod 上的前 [onIpodNoLocal] 首**本地没留**（这种是"有事可做"的），
+/// 其余本地也留着；不在 iPod 上的按 [downloaded] 算本地有没有。
+bool _localOf(int i, int onIpod, int onIpodNoLocal, int downloaded) =>
+    i < onIpod ? (i >= onIpodNoLocal) : (i < onIpod + downloaded);
+
 Map<String, dynamic> songsPayload({
   int total = 5,
   int onIpod = 1,
@@ -39,6 +46,10 @@ Map<String, dynamic> songsPayload({
   /// 这种行**是可以勾的**——用户点「下载到本地」时它有事可做。
   /// 以前这种行直接被置灰，用户想重新下都选不中。
   int onIpodNoLocal = 0,
+
+  /// 没插设备（或库读不出来）。这时设备这一维**判断不了**——
+  /// 后端会回 device_unknown=true、每首歌 device='unknown'。
+  bool deviceUnknown = false,
   int page = 1,
   int size = 50,
   String status = 'all',
@@ -52,14 +63,18 @@ Map<String, dynamic> songsPayload({
         'artist': '歌手$i',
         'album': '专辑$i',
         'duration_ms': 200000,
-        'status': i < onIpod
-            ? 'on_ipod'
-            : (i < onIpod + downloaded ? 'downloaded' : 'pending'),
-        // 两个维度分开给：`selectable` 现在看的是"有没有活干"。
-        // 在 iPod 上的前 onIpodNoLocal 首"本地没留"（那种是可勾的），
-        // 其余本地也留着；不在 iPod 上的按 downloaded 算本地有没有。
-        'on_ipod': i < onIpod,
-        'local': i < onIpod ? (i >= onIpodNoLocal) : (i < onIpod + downloaded),
+        // ★ 现在跟真后端一样，**两个维度各给一份**：
+        //   status 只说本地（pending / downloaded），device 只说设备。
+        //   以前 status 是合成三态，夹具也就跟着合成——测不出"设备上有、
+        //   本地没留"到底算哪一档。
+        'status': _localOf(i, onIpod, onIpodNoLocal, downloaded) 
+            ? 'downloaded'
+            : 'pending',
+        'on_ipod': !deviceUnknown && i < onIpod,
+        'local': _localOf(i, onIpod, onIpodNoLocal, downloaded),
+        'device': deviceUnknown
+            ? 'unknown'
+            : (i < onIpod ? 'on_ipod' : 'off_ipod'),
       },
   ];
   var matched = status == 'all'
@@ -80,6 +95,13 @@ Map<String, dynamic> songsPayload({
   final start = (page - 1) * size;
   final window = matched.skip(start).take(size).toList();
 
+  // 从完整列表算，不看筛选/分页——真后端的 counts 也是整单的
+  final localOk = all.where((s) => s['local'] == true).length;
+  final onIpodCount = all.where((s) => s['on_ipod'] == true).length;
+  final both = all
+      .where((s) => s['local'] == true && s['on_ipod'] == true)
+      .length;
+
   return <String, dynamic>{
     'playlist': '通勤歌单',
     'loading': false,
@@ -89,10 +111,21 @@ Map<String, dynamic> songsPayload({
     'total': total,
     'filtered': matched.length,
     'pages': matched.isEmpty ? 1 : ((matched.length + size - 1) ~/ size),
-    'counts': <String, int>{
-      'on_ipod': onIpod,
-      'downloaded': downloaded,
-      'pending': total - onIpod - downloaded,
+    // ★ 计数**从曲目列表算出来**，不是另抄一份参数。
+    //   另抄一份的话，夹具自己就能跟 songs 打架（改了一处忘另一处），
+    //   测出来的东西跟真后端不一定是一回事。
+    'counts': <String, dynamic>{
+      'local_ok': localOk,
+      'local_missing': total - localOk,
+      'on_ipod': deviceUnknown ? 0 : onIpodCount,
+      'off_ipod': deviceUnknown ? 0 : (total - onIpodCount),
+      'device_unknown': deviceUnknown,
+      'both': both,
+      'on_ipod_but_no_local': onIpodCount - both,
+      'local_but_not_on_ipod': localOk - both,
+      // 旧键名保留，语义跟真后端一致
+      'downloaded': localOk,
+      'pending': total - localOk,
       'all': total,
     },
     'songs': window,
@@ -138,6 +171,7 @@ ApiClient fakeApi(
   /// 这种行**是可勾的**——用户点「下载到本地」时它有事可做。
   /// 以前它被并进"已同步"里直接置灰，用户想重下都选不中。
   int onIpodNoLocal = 0,
+  bool deviceUnknown = false,
   int pageSize = 50,
   List<int>? pendingIds,
 }) {
@@ -159,6 +193,7 @@ ApiClient fakeApi(
           onIpod: onIpod,
           downloaded: downloaded,
           onIpodNoLocal: onIpodNoLocal,
+          deviceUnknown: deviceUnknown,
           page: int.tryParse(uri.queryParameters['page'] ?? '1') ?? 1,
           size: int.tryParse(uri.queryParameters['size'] ?? '50') ?? 50,
           status: uri.queryParameters['status'] ?? 'all',
@@ -346,7 +381,7 @@ void main() {
       // 切到"未下载"
       await tester.tap(find.byType(DropdownButton<SongFilter>).first);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('未下载').last);
+      await tester.tap(find.text('本地未下载').last);
       await tester.pumpAndSettle();
 
       final songsCall = rec.calls.where((c) => c.path.endsWith('/songs')).last;
@@ -364,7 +399,7 @@ void main() {
 
       await tester.tap(find.byType(DropdownButton<SongFilter>).first);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('未下载').last);
+      await tester.tap(find.text('本地未下载').last);
       await tester.pumpAndSettle();
 
       expect(
@@ -552,7 +587,10 @@ void main() {
         fakeApi(rec, total: 3, onIpod: 2, downloaded: 0, onIpodNoLocal: 2),
       );
 
-      expect(find.text('已同步 · 本地无'), findsWidgets, reason: '只写"已同步"会让用户以为不用管');
+      // ★ 现在两个维度各一个徽章，不再合成一个词：
+    //   "本地没有" + "iPod 上已有" —— 只写"已同步"会让人以为不用管
+    expect(find.text('本地没有'), findsWidgets);
+    expect(find.text('iPod 上已有'), findsWidgets);
 
       await tester.tap(find.text('歌曲0'));
       await tester.pumpAndSettle();
@@ -571,7 +609,7 @@ void main() {
         fakeApi(rec, total: 3, onIpod: 1, downloaded: 0),
       );
 
-      expect(find.text('已同步'), findsWidgets);
+      expect(find.text('iPod 上已有'), findsWidgets);
       await tester.tap(find.text('歌曲0'));
       await tester.pumpAndSettle();
 
@@ -719,6 +757,57 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(rec.bodyFor('/api/cache/remove'), isNull);
+    });
+  });
+
+  group('★ 两个维度分开显示（本地 / 设备）', () {
+    testWidgets('没插设备时说「未插设备」，不假装设备上没有', (tester) async {
+      await pumpPlaylists(
+        tester,
+        fakeApi(Recorder(), onIpod: 1, downloaded: 1, deviceUnknown: true),
+      );
+
+      // ★ 以前后端没插设备时返回空集，界面把同步过的歌全标成"未同步"，
+      //   用户以为白同步了。现在明说判断不了。
+      expect(
+        find.textContaining('未插设备'),
+        findsWidgets,
+        reason: '判断不了就说不知道——假装"设备上没有"是假话',
+      );
+      expect(find.text('iPod 上已有'), findsNothing);
+      expect(find.text('iPod 上没有'), findsNothing);
+    });
+
+    testWidgets('设备上有、本地没留的行：两个徽章各说各的', (tester) async {
+      await pumpPlaylists(
+        tester,
+        fakeApi(
+          Recorder(),
+          total: 3,
+          onIpod: 1,
+          downloaded: 0,
+          onIpodNoLocal: 1,
+        ),
+      );
+
+      // 歌曲0 在 iPod 上、本地没留 → "本地没有" + "iPod 上已有" 同时出现。
+      // 合成一个词的话，这件事就被藏起来了——而那正是"该重新下载"的那批。
+      expect(find.text('本地没有'), findsWidgets);
+      expect(find.text('iPod 上已有'), findsWidgets);
+    });
+
+    testWidgets('汇总行把两维分开报，且不把"判断不了"算成"缺"', (tester) async {
+      await pumpPlaylists(
+        tester,
+        fakeApi(Recorder(), total: 5, onIpod: 2, downloaded: 1, deviceUnknown: true),
+      );
+
+      expect(find.textContaining('本地：已下'), findsOneWidget);
+      expect(
+        find.textContaining('未插设备（状态未知）'),
+        findsOneWidget,
+        reason: '不能报成"iPod：已有 0 / 缺 5"——那是我们不知道的事',
+      );
     });
   });
 }

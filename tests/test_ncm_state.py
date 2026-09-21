@@ -194,17 +194,26 @@ class TestDownloadCache:
 
         assert store.cached_download(555) is None
 
-    def test_stale_entry_is_cleaned_up(
+    def test_文件没了就停止计数_但记录留着(
         self, store: StateStore, tmp_path: Path
     ) -> None:
-        """发现失效就该顺手清掉，别每次都要重新判一遍。"""
+        """★ 契约**有意**改了：以前是"顺手把记录删掉"，现在只停止计数。
+
+        改的理由见 ``state.py`` 的 ``downloaded_song_ids``：判据一旦出错
+        （路径解析跟着工作目录跑），"删数据"就是不可逆的——实测因此丢了
+        7 条好记录，用户看到的是"装了新版本之后全部变成未下载"。
+        要看"记录在、文件丢了"用 ``missing_download_ids``。
+        """
         audio = tmp_path / "gone.mp3"
         audio.write_bytes(b"ID3")
         store.remember_download(555, audio)
         audio.unlink()
 
-        store.cached_download(555)   # 触发清理
+        store.cached_download(555)   # 触发核对
         assert store.stats()["downloaded"] == 0
+        assert store.missing_download_ids() == {555}
+        assert len(store.list_downloads()) == 1, "文件没了不等于记录是脏的"
+
 
     def test_missing_file_returns_none(self, store: StateStore, tmp_path: Path) -> None:
         store.remember_download(999, tmp_path / "never-existed.mp3")
@@ -230,13 +239,31 @@ class TestStats:
         store.save_account(1, "c")
         store.mark_synced(1, ipod_location="a", size=100)
         store.mark_synced(2, ipod_location="b", size=250)
-        store.remember_download(1, tmp_path / "x.mp3")
+
+        # 文件要真的建出来：`downloaded` 现在数的是"文件还在的"，
+        # 不是"记录条数"——界面上写"已下载 N 首"就得是 N 首能播的。
+        real = tmp_path / "x.mp3"
+        real.write_bytes(b"ID3")
+        store.remember_download(1, real)
 
         stats = store.stats()
         assert stats["synced"] == 2
         assert stats["downloaded"] == 1
+        assert stats["download_records"] == 1
+        assert stats["download_missing"] == 0
         assert stats["accounts"] == 1
         assert stats["synced_bytes"] == 350
+
+    def test_文件丢了的记录单独数出来(self, store: StateStore, tmp_path: Path) -> None:
+        real = tmp_path / "在.mp3"
+        real.write_bytes(b"ID3")
+        store.remember_download(1, real)
+        store.remember_download(2, tmp_path / "没了.mp3")
+
+        stats = store.stats()
+        assert stats["downloaded"] == 1, "只有文件真在的才算已下载"
+        assert stats["download_records"] == 2
+        assert stats["download_missing"] == 1, "丢的那条要单独报，不能混进已下载"
 
 
 class TestPersistence:
@@ -550,13 +577,13 @@ class TestDownloadedSongIdsVerifiesFiles:
 
         assert store.downloaded_song_ids() == {1}
 
-    def test_stale_records_are_healed(self, store: StateStore, tmp_path: Path) -> None:
-        """★ 顺手把脏记录清掉（自愈），不留着反复骗人。"""
+    def test_文件找不到的记录不再算已下载(self, store: StateStore, tmp_path: Path) -> None:
+        """★ 只过滤，**不删**（契约有意改了，理由见上面那条测试）。"""
         store.remember_download(1, tmp_path / "never.mp3")
 
-        store.downloaded_song_ids()
-
-        assert store.list_downloads() == [], "脏记录该被清掉，不然界面一直显示已下载"
+        assert store.downloaded_song_ids() == set()
+        assert store.missing_download_ids() == {1}
+        assert len(store.list_downloads()) == 1, "记录该留着——删了不可逆"
 
     def test_real_files_are_not_touched(self, store: StateStore, tmp_path: Path) -> None:
         """别矫枉过正——文件真在的不能被误删。"""
@@ -589,3 +616,93 @@ class TestDownloadedSongIdsVerifiesFiles:
             assert (song_id in ids) == (
                 store.cached_download(song_id) is not None
             ), f"第 {song_id} 首两处判断打架了"
+
+
+class Test缓存路径解析:
+    """★ 回归：下载记录里存的是**相对数据目录**的路径。
+
+    这里出过一次真实事故：相对路径被按**当前工作目录**解析，用户从发行版
+    目录启动时找不到文件，于是——**记录被当成脏数据删掉**，歌单页全部
+    显示"未下载"，而文件其实好好地躺在缓存目录里。
+
+    所以两件事都要守住：
+    1. 相对路径按**数据目录**解析，跟工作目录无关；
+    2. 找不到文件时**不能删记录**。
+    """
+
+    def _make_file(self, store: StateStore, relpath: str) -> Path:
+        path = store.data_dir() / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake mp3")
+        return path
+
+    def test_相对路径按数据目录解析_跟工作目录无关(
+        self, store: StateStore, tmp_path: Path, monkeypatch
+    ) -> None:
+        """★ 核心回归：换个工作目录，结果必须一样。"""
+        self._make_file(store, ".ncm/cache/123 歌名.mp3")
+        store.remember_download(123, ".ncm/cache/123 歌名.mp3")
+
+        assert store.downloaded_song_ids() == {123}
+
+        # 把工作目录换到别处（模拟"从发行版目录启动"）
+        elsewhere = tmp_path / "别处"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        assert store.downloaded_song_ids() == {123}, (
+            "相对路径跟着工作目录跑了——发行版启动时就会全部显示未下载"
+        )
+        assert store.cached_download(123) is not None
+
+    def test_写入时存的是相对路径(self, store: StateStore) -> None:
+        """存相对的，数据目录搬家后记录依然指得对。"""
+        path = self._make_file(store, ".ncm/cache/456.mp3")
+        store.remember_download(456, path)  # 传绝对路径
+
+        record = store.cached_download(456)
+        assert record is not None
+        # 库里存的应该是相对形式
+        with store._connect() as conn:  # noqa: SLF001
+            raw = conn.execute(
+                "SELECT path FROM downloads WHERE song_id = 456"
+            ).fetchone()["path"]
+        assert not Path(raw).is_absolute(), f"存成绝对路径了：{raw}"
+
+    def test_文件丢了不删记录_只标记(self, store: StateStore) -> None:
+        """★ 这是那次事故的直接原因：判据错了就删数据。
+
+        文件找不到只说明"本地没有这份"，**不能**因此丢掉记录——
+        记录里的歌名/艺人/来源是有价值的元数据。
+        """
+        store.remember_download(789, ".ncm/cache/789 已经删了.mp3")
+
+        assert store.downloaded_song_ids() == set()
+        assert store.missing_download_ids() == {789}
+
+        # 记录还在
+        rows = store.list_downloads()
+        assert [r.song_id for r in rows] == [789], "文件没了就把记录删了——不可逆"
+
+    def test_两种状态不重叠(self, store: StateStore) -> None:
+        self._make_file(store, ".ncm/cache/1.mp3")
+        store.remember_download(1, ".ncm/cache/1.mp3")
+        store.remember_download(2, ".ncm/cache/2 没了.mp3")
+
+        assert store.downloaded_song_ids() == {1}
+        assert store.missing_download_ids() == {2}
+
+    def test_绝对路径原样识别(self, store: StateStore, tmp_path: Path) -> None:
+        """用户把缓存指到别的盘时存的就是绝对路径。"""
+        outside = tmp_path / "别处" / "x.mp3"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_bytes(b"x")
+        store.remember_download(3, outside)
+
+        assert store.downloaded_song_ids() == {3}
+
+    def test_清空缓存仍然能真删记录(self, store: StateStore) -> None:
+        """不自动删 ≠ 不能删：显式清理还是要真的删掉。"""
+        store.remember_download(5, ".ncm/cache/5.mp3")
+        assert store.clear_downloads() == 1
+        assert store.list_downloads() == []
