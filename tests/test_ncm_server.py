@@ -11,14 +11,14 @@ from ipod_cli.ncm.server import _redact
 
 class TestRedact:
     def test_cookie_is_masked(self) -> None:
-        line = ("[INFO] Request Success: [eapi] /playlist/track/all?id=2698052064"
+        line = ("[INFO] Request Success: [eapi] /playlist/track/all?id=1000000001"
                 "&cookie=MUSIC_A_T=1111111111; MUSIC_R_T=2222222222")
         out = _redact(line)
         assert "MUSIC_A_T=1111111111" not in out
         assert "2222222222" not in out
         assert "<已隐去>" in out
         # 有用的部分要留着，不然日志没意义了
-        assert "/playlist/track/all" in out and "2698052064" in out
+        assert "/playlist/track/all" in out and "1000000001" in out
 
     def test_repeated_cookie_params_are_all_masked(self) -> None:
         """真机上那条 URL 里 cookie 参数会重复出现好几次。"""
@@ -38,10 +38,14 @@ class TestRedact:
         assert _redact("") == ""
 
     def test_end_to_end_on_a_real_shaped_line(self) -> None:
-        """拿实测见过的那种行跑一遍：cookie 必须**完全**消失。"""
+        """拿真实日志那种形状的行跑一遍：cookie 必须**完全**消失。
+
+        值都是编的（111/222 一眼假、playlist id 也是假的）—— 这条测试守的是
+        **脱敏函数**，拿真实凭据来测没有意义，只会把凭据留在版本库里。
+        """
         line = (
             "23:39:06  INFO  ipod_web  [INFO] Request Success: [eapi] "
-            "/playlist/track/all?id=2698052064&cookie=MUSIC_A_T=1111111111;"
+            "/playlist/track/all?id=1000000001&cookie=MUSIC_A_T=1111111111;"
             "+Max-Age=2147483647;+Expires=Thu,+07+Oct+2094+15:54:47+GMT;+Path=/eapi/clientlog;"
             ";MUSIC_R_T=2222222222;+Max-Age=2147483647"
         )
