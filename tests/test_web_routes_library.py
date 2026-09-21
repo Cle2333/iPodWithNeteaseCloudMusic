@@ -1,4 +1,4 @@
-"""本地音乐（iPod 曲目列表 / 导入 / 删除 / 健康检查）的路由测试。
+"""本地音乐（iPod 曲目列表 / 导入 / 删除）的路由测试。
 
 跑在**虚拟 iPod** 上（tmp_path 里的），不碰真机。需要 ffmpeg 的用例
 会自动跳过而不是假通过。
@@ -465,48 +465,6 @@ class TestRemove:
         resp = ipod_client.post("/api/library/remove/preview", json={"ids": [huge]})
         assert resp.status_code == 404
         assert len(ids) == 3
-
-
-class TestVerifyJob:
-    @ffmpeg_required
-    def test_verify_runs_and_reports_checks(
-        self, ipod_ctx, ipod_client, music_dir
-    ) -> None:
-        import_tracks(ipod_ctx, music_dir, 2)
-
-        job_id = ipod_client.post("/api/library/verify").json()["job_id"]
-        assert ipod_ctx.jobs.wait_idle(90)
-
-        detail = ipod_client.get(f"/api/jobs/{job_id}").json()
-        assert detail["state"] == "done", detail.get("error")
-
-        checks = detail["result"]["checks"]
-        assert len(checks) == detail["result"]["total"]
-        assert all("summary" in c and "details" in c for c in checks)
-
-        texts = "\n".join(line["text"] for line in detail["log"])
-        assert "检查完成" in texts
-
-    def test_verify_without_device_fails_gracefully(self, web_store, tmp_path) -> None:
-        from fastapi.testclient import TestClient
-
-        from ipod_web.app import create_app
-        from ipod_web.context import WebContext
-        from ipod_web.jobs import JobManager
-
-        ctx = WebContext(
-            store=web_store,
-            jobs=JobManager(),
-            ipod_path=str(tmp_path / "没设备"),
-            cache_dir=tmp_path / "cache",
-        )
-        with TestClient(create_app(ctx)) as c:
-            job_id = c.post("/api/library/verify").json()["job_id"]
-        assert ctx.jobs.wait_idle(30)
-
-        detail = c.get(f"/api/jobs/{job_id}").json()
-        assert detail["state"] == "failed"
-        assert detail["error"], "失败却没记原因"
 
 
 class TestDeviceRegisteredWithTheKernel:

@@ -19,7 +19,7 @@
 2. 读设备信息 + 读库（曲目数、播放列表）
 3. 导入一个真音频文件（先预览、再执行、轮询作业）
 4. 读回：曲目数要涨、新曲目要能查到
-5. 跑一次健康检查
+5. 跑一次数据库修复扫描（核对库与磁盘是否一致）
 6. 退出后确认端口/子进程都收干净
 
 用法：
@@ -238,33 +238,34 @@ def main() -> int:
         check("重复导入没有把曲目变多", len(tracks_after) == len(tracks_before),
               f"{len(tracks_before)} → {len(tracks_after)}")
 
-    print("══ 6. 健康检查 ══")
+    print("══ 6. 数据库修复扫描 ══")
     try:
-        vstart = api("POST", "/api/library/verify", timeout=60)
-        vjob = wait_job(vstart.get("job_id"), timeout=300)
-        check("健康检查跑完", vjob.get("state") == "done", f"state={vjob.get('state')}")
-        result = vjob.get("result") or {}
-        for c in result.get("checks") or []:
-            mark = {"ok": "OK  ", "fail": "FAIL", "warn": "WARN"}.get(
-                c.get("status"), str(c.get("status")))
-            print(f"        [{mark}] {c.get('name')}  {str(c.get('summary') or '')[:70]}")
+        sstart = api("POST", "/api/repair/scan", timeout=60)
+        sjob = wait_job(sstart.get("job_id"), timeout=300)
+        check("扫描跑完", sjob.get("state") == "done", f"state={sjob.get('state')}")
+        result = sjob.get("result") or {}
+        orphans = (result.get("orphans") or {}).get("count", 0)
+        broken = (result.get("broken") or {}).get("count", 0)
+        temp = (result.get("stray_temp") or {}).get("count", 0)
+        print(f"        数据库 {result.get('db_tracks')} 首 · "
+              f"磁盘 {result.get('disk_files')} 个文件")
+        print(f"        孤儿 {orphans} · 断链 {broken} · 临时文件 {temp}")
+        for item in (result.get("broken") or {}).get("items") or []:
+            print(f"        [断链] {item.get('title')} — {item.get('artist')}")
 
         # ★ 彩排目录**故意不含 Music/**（rehearsal_from_backup 只拷
-        #   Device/iTunes/Artwork），所以"文件对应"这一项必然失败。那不是 bug，
-        #   是健康检查**正确地**发现了"库里有记录、磁盘没文件"。
-        #   真机上这一项必须是 ok——所以只在真机上把它当作失败。
+        #   Device/iTunes/Artwork），所以"断链"数必然等于库里的曲目数。那不是
+        #   bug，是扫描**正确地**发现了"库里有记录、磁盘没文件"。
         is_rehearsal = not str(ipod).rstrip("\\/").endswith(":")
-        bad = [c for c in (result.get("checks") or [])
-               if c.get("status") == "fail"
-               and not (is_rehearsal and c.get("name") == "文件对应")]
-        if is_rehearsal and any(c.get("name") == "文件对应"
-                                and c.get("status") == "fail"
-                                for c in (result.get("checks") or [])):
-            print("        （彩排不含 Music/，这一项失败是预期的；真机上必须过）")
-        check("健康检查无真实失败项", not bad,
-              "；".join(f"{c.get('name')}: {c.get('summary')}" for c in bad))
+        if is_rehearsal:
+            check("彩排不含 Music/，断链数应等于库里的曲目数",
+                  broken == result.get("db_tracks"),
+                  f"断链 {broken} vs 曲目 {result.get('db_tracks')}")
+        else:
+            check("真机上没有断链记录", broken == 0, f"{broken} 首")
+            check("真机上没有孤儿文件", orphans == 0, f"{orphans} 个")
     except urllib.error.HTTPError as exc:
-        check("健康检查跑完", False, f"HTTP {exc.code}")
+        check("扫描跑完", False, f"HTTP {exc.code}")
 
     print("══ 7. 歌单往返（新建 → 加歌 → 移出 → 改名 → 删除）══")
     # ★ 这一整套的价值在于最后一条：**删歌单不能删歌**。

@@ -273,14 +273,14 @@ void main() {
       expect(find.textContaining('歌单'), findsWidgets);
     });
 
-    testWidgets('★ 非下载类作业不显示（备份/健康检查不该混进来）', (tester) async {
+    testWidgets('★ 非下载类作业不显示（备份/环境自检不该混进来）', (tester) async {
       await pumpDownload(
         tester,
         fakeApi(
           jobs: <Map<String, dynamic>>[
             job(
-              kind: 'verify',
-              title: '健康检查',
+              kind: 'backup',
+              title: '备份设备',
               items: <Map<String, dynamic>>[item(1, '随便', 'done')],
             ),
             job(kind: 'doctor', title: '环境自检'),
@@ -290,7 +290,7 @@ void main() {
       expect(
         find.textContaining('还没有跑过下载或同步'),
         findsOneWidget,
-        reason: '健康检查/环境自检混进下载页了',
+        reason: '备份/环境自检混进进度页了',
       );
       expect(find.text('随便'), findsNothing);
     });

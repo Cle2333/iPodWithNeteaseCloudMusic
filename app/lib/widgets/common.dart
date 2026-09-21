@@ -346,7 +346,7 @@ class Dot extends StatelessWidget {
   );
 }
 
-/// 三种检查状态对应的颜色（健康检查、歌单同步状态都用它）。
+/// 三种检查状态对应的颜色（歌单同步状态用它）。
 Color statusColor(String status) => switch (status) {
   'ok' || 'on_ipod' || 'add' => StatusColors.ok,
   'warn' || 'downloaded' || 'transcode' => StatusColors.warn,

@@ -83,7 +83,7 @@ class _LibraryPageState extends State<LibraryPage> {
   @override
   void initState() {
     super.initState();
-    // 作业干完自动重刷：导入、删除、健康检查都走队列，
+    // 作业干完自动重刷：导入、删除、修复都走队列，
     // 干完之后 iPod 上的曲目列表就变了。以前是拍脑袋等 5 秒，
     // 现在由 refreshSignal 在作业**真的完成**时通知。
     _state.refreshSignal.addListener(_onJobFinished);
@@ -462,16 +462,6 @@ class _LibraryPageState extends State<LibraryPage> {
       await _api.removeTracks(ids, previewId: preview.previewId);
       _toast('已加入队列：删除 ${preview.count} 首');
       _clearSelection();
-      if (mounted) await context.read<AppState>().refreshNow();
-    } catch (e) {
-      _toast(e.toString(), error: true);
-    }
-  }
-
-  Future<void> _verify() async {
-    try {
-      await _api.runVerify();
-      _toast('已开始健康检查，到「下载」页看结果');
       if (mounted) await context.read<AppState>().refreshNow();
     } catch (e) {
       _toast(e.toString(), error: true);
@@ -958,14 +948,10 @@ class _LibraryPageState extends State<LibraryPage> {
                 : (_playlistMode ? () => _loadPlaylists() : () => _load()),
           ),
           const SizedBox(width: 6),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.monitor_heart_outlined, size: 16),
-            label: const Text('健康检查'),
-            onPressed: busy ? null : _verify,
-          ),
-          const SizedBox(width: 8),
-          // 「健康检查」告诉你**哪儿不对**，「数据库修复」负责**把它修好**。
-          // 两个挨着放：看完报告正好顺手修。
+          // 「数据库修复」一步到位：扫出数据库和磁盘对不上的地方，
+          // 勾选后直接清掉。以前这里还有个「健康检查」，它只诊断不动手，
+          // 而且结论写在一个看不到的作业日志里 —— 用户的原话是"假功能"。
+          // 它唯一能操作的那一项（文件对应）已经被这个功能覆盖了。
           OutlinedButton.icon(
             icon: const Icon(Icons.build_outlined, size: 16),
             label: const Text('数据库修复'),

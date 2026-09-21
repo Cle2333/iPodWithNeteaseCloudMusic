@@ -1,4 +1,4 @@
-"""iPod 上的本地音乐：列表、导入、删除、健康检查。
+"""iPod 上的本地音乐：列表、导入、删除。
 
 两条贯穿全文的安全设计：
 
@@ -460,61 +460,4 @@ def _run_remove(ctx: WebContext, handle, ids: list[str], delete_files: bool) -> 
         "file_errors": len(result.file_errors),
         "bytes_freed": plan.bytes_freed,
         "verified": result.verified,
-    }
-
-
-# ──────────────────────────────────────────────────────────────────────
-# 健康检查
-# ──────────────────────────────────────────────────────────────────────
-
-
-@router.post("/verify")
-def verify(ctx: WebContext = Depends(get_ctx)) -> dict[str, Any]:
-    """跑一次完整健康检查（作业）。
-
-    走队列而不是直接跑：检查要逐项读数据库和磁盘，跟正在进行的写入并行
-    会读到半截状态，然后报一个不存在的故障。
-    """
-    job = ctx.jobs.submit("verify", "健康检查", lambda handle: _run_verify(ctx, handle))
-    return {"ok": True, "job_id": job.id, "message": "已开始健康检查"}
-
-
-def _run_verify(ctx: WebContext, handle) -> dict[str, Any]:
-    from ipod_cli.verify import check_device
-
-    device = ctx.device()
-    handle.log(f"正在检查 {device.display_name}…")
-
-    report = check_device(device, progress=handle.progress)
-
-    for check in report.checks:
-        level = {"ok": "info", "warn": "warn", "fail": "error"}.get(
-            check.status, "info"
-        )
-        handle.log(f"{check.name}：{check.summary}", level=level)
-        # 明细单独打出来——"封面有问题"这种话不说明是哪些图，
-        # 用户拿它没法排查
-        for line in check.details:
-            handle.log(f"    {line}", level=level)
-
-    failed = len(report.failures)
-    warned = len(report.warnings)
-    handle.log(
-        f"检查完成：{'全部通过' if report.ok else f'{failed} 项失败、{warned} 项警告'}"
-    )
-
-    return {
-        "ok": report.ok,
-        "total": len(report.checks),
-        "failed": failed,
-        "warned": warned,
-        "checks": [
-            {
-                "name": check.name,
-                "status": check.status,
-                "summary": check.summary,
-                "details": check.details,
-            }
-            for check in report.checks
-        ],
     }

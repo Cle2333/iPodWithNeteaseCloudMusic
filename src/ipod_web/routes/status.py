@@ -1,4 +1,4 @@
-"""状态、设备信息、健康检查。"""
+"""状态、设备信息（含就绪探测）。"""
 
 from __future__ import annotations
 

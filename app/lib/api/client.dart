@@ -337,11 +337,6 @@ class ApiClient {
     return json['job_id']?.toString() ?? '';
   }
 
-  Future<String> runVerify() async {
-    final json = await _post('/api/library/verify');
-    return json['job_id']?.toString() ?? '';
-  }
-
   // ── 设备修复 ──────────────────────────────────────────────────────
   //
   // 扫描和执行是**两个独立的作业**：界面必须先把扫描结果摆给用户看、

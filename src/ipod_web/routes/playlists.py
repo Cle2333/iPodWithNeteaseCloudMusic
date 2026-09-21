@@ -656,7 +656,10 @@ def _run_sync(
             handle.log(f"写入失败：{name} —— {reason}", level="error")
 
     if not ipod_outcome.verified:
-        handle.log("⚠ 读回校验未通过，请到音乐库页跑一次健康检查", level="warn")
+        handle.log(
+            "⚠ 读回校验未通过，请到「iPod 音乐管理」页跑一次数据库修复",
+            level="warn",
+        )
 
     handle.log(
         f"完成：写入 {ipod_outcome.added} 首"
