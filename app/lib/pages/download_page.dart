@@ -1,7 +1,14 @@
-/// 下载页：只看进度。
+/// 进度页：只看进度。
 ///
-/// 这里**只**回答一个问题——"这次的下载/同步跑到哪了"：进度条、逐首歌的
-/// 结果（含失败原因）、还要多久、能不能取消。
+/// 这里**只**回答一个问题——"这次跑到哪了"：在哪个阶段、这一步完成多少、
+/// 逐首歌的结果（含失败原因）、还要多久、能不能取消。
+///
+/// ★ 为什么单独强调"阶段"：一次同步要过好几段，每段耗时差一个数量级
+/// （实测 147 首：转码 6 分钟、拷贝 3 分钟、写库 6 秒）。以前只报百分比，
+/// 而写入 iPod 那一段既不报百分比也不报阶段——界面整整 6 分钟一片空白，
+/// 用户的反馈是"传很多歌就以为被卡住了"。现在两样都有：阶段名 + 进度条，
+/// 切不出等份的段（刷盘 / 整库重写）显示不确定进度条（一直在滚的）。
+/// 判据只有一条：**只要还在干活，界面上就必须有东西在动。**
 ///
 /// 曾经这里还有第二个标签「本地已下载」，管电脑上那份缓存（搜索/排序/多选
 /// 删除/按来源歌单分组）。2026-09-20 合并掉了：那套东西回答的是"这首歌本地
@@ -39,16 +46,18 @@ class DownloadPage extends StatelessWidget {
           child: Row(
             children: <Widget>[
               const Text(
-                '下载进度',
+                '进度',
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
               ),
               const Spacer(),
-              // 正在跑的时候把"在跑什么"顺带写在标题行，省得用户去别处找
+              // 正在跑的时候把"在跑什么 / 跑到哪个阶段了"顺带写在标题行，
+              // 省得用户去别处找。阶段比数字有用——数字在原地时，
+              // 是阶段名在告诉用户"没卡住，只是还没走完这一步"。
               if (job != null && !job.finished)
                 Text(
                   job.total > 0
                       ? '${job.title} · ${job.done}/${job.total}'
-                      : job.title,
+                      : '${job.title}${job.stage.isNotEmpty ? ' · ${job.stage}' : ''}',
                   style: TextStyle(
                     fontSize: 12.5,
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -137,7 +146,9 @@ class _TaskTabState extends State<_TaskTab> {
         padding: EdgeInsets.all(18),
         child: Notice(
           icon: Icons.download_done_outlined,
-          text: '还没有下载过东西。\n到「歌单」页挑一个歌单，勾几首或者整单下下来。',
+          text: '还没有跑过下载或同步。\n'
+              '到「歌单」页挑一个歌单，勾几首或者整单下下来 —— '
+              '下载和同步的进度都会显示在这里。',
         ),
       );
     }
@@ -177,7 +188,42 @@ class _TaskTabState extends State<_TaskTab> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           const SizedBox(height: 4),
-          if (job.total > 0) ...<Widget>[
+          // ── 阶段行：整个进度页最重要的一行 ─────────────────────────
+          // 同步要过好几段，每段耗时差一个数量级（实测转码 6 分钟、拷贝 3 分钟、
+          // 写库 6 秒）。进度条只说明"这一段走了多少"，阶段名才说明"在干什么"。
+          // 用户投诉"传很多歌就以为被卡住了"——正是因为以前这里一片空白。
+          if (job.running && job.stageLine.isNotEmpty) ...<Widget>[
+            Row(
+              children: <Widget>[
+                const SizedBox(
+                  width: 13,
+                  height: 13,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    job.stageLine,
+                    style: const TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (job.elapsed > 0)
+                  Text(
+                    '已用 ${_duration(job.elapsed)}',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (job.hasCounts) ...<Widget>[
             Row(
               children: <Widget>[
                 Text(
@@ -215,9 +261,32 @@ class _TaskTabState extends State<_TaskTab> {
                 backgroundColor: scheme.surfaceContainerHighest,
               ),
             ),
+          ] else if (job.running) ...<Widget>[
+            // ★ 没有总数 = 这一段**切不出等份**（整库重写、刷盘、算签名）。
+            //
+            // 画一根停在 0% 的条是错的——那看起来就是卡死，而写库/刷盘其实
+            // 正在干活。所以画**不确定进度条**（一直在滚的那种）：只要它在滚，
+            // 用户就知道程序还活着。
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                minHeight: 8,
+                backgroundColor: scheme.surfaceContainerHighest,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              '这一步拆不成小段（整库重写 / 刷盘），进度条只表示"还在干"。'
+              '它在滚就说明没卡住 —— 这一步请别拔设备。',
+              style: TextStyle(
+                fontSize: 12,
+                color: scheme.onSurfaceVariant,
+                height: 1.5,
+              ),
+            ),
           ] else
             Text(
-              job.running ? '正在读取歌单…' : '没有进度信息',
+              '没有进度信息',
               style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
             ),
           if (job.running && job.current.isNotEmpty) ...<Widget>[
@@ -232,7 +301,9 @@ class _TaskTabState extends State<_TaskTab> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    '正在下载：${job.current}',
+                    job.stage.contains('写入') || job.stage.contains('数据库')
+                        ? '正在处理：${job.current}'
+                        : '正在下载：${job.current}',
                     style: const TextStyle(fontSize: 12.5),
                     overflow: TextOverflow.ellipsis,
                   ),

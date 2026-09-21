@@ -494,9 +494,20 @@ class _PlaylistDetailState extends State<_PlaylistDetail> {
               ),
               const SizedBox(height: 12),
               _kv('本次范围', scopeText),
-              _kv('要处理', '${plan.toDownload} 首'),
-              _kv('本地已有（不用再下）', '${plan.toDownload - plan.needsFetch} 首'),
-              _kv('需要下载', '${plan.needsFetch} 首'),
+              // ★ 两个数字要**分开说清楚**，而且要跟着动作换说法：
+              //
+              //   `toDownload` = 这次要处理几首（同步时 = 会写进 iPod 几首）
+              //   `needsFetch` = 其中需要先下载几首
+              //
+              // 在"下载好了再同步"这条主路径上 needsFetch 必然等于 0。以前
+              // 确认按钮用的是 needsFetch，于是显示「开始同步 0 首」——用户
+              // 看到 0 以为没东西可同步，根本不会点，同步作业也就从来没提交过。
+              // 实测就是这么卡住的（作业历史里那次 plan 后面空无一物）。
+              _kv(push ? '要同步' : '要下载', '${plan.toDownload} 首'),
+              if (plan.needsFetch > 0)
+                _kv('其中需要先下载', '${plan.needsFetch} 首'),
+              if (plan.toDownload > plan.needsFetch)
+                _kv('本地已有（不用再下）', '${plan.toDownload - plan.needsFetch} 首'),
               if (plan.alreadyReady > 0)
                 _kv('已经就绪（可跳过）', '${plan.alreadyReady} 首'),
               for (final entry in plan.skipReasons.entries)
@@ -540,9 +551,14 @@ class _PlaylistDetailState extends State<_PlaylistDetail> {
           ),
           FilledButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(
-              push ? '开始同步 ${plan.needsFetch} 首' : '开始下载 ${plan.needsFetch} 首',
-            ),
+            // ★ 这里必须是 `toDownload`（要处理几首），**不是** `needsFetch`。
+            //
+            // needsFetch 是"其中需要先下载几首"。在"先把歌下到本地、再点同步"
+            // 这条主路径上它**必然等于 0**，于是按钮显示「开始同步 0 首」——
+            // 用户看到 0，以为没东西可同步（或者以为坏了），就不点。
+            // 同步作业因此从来没提交过，表现就是"下载好了无法同步"。
+            // 实测在作业历史里确认过：那次 plan 之后空无一物。
+            child: Text('${push ? '开始同步' : '开始下载'} ${plan.toDownload} 首'),
           ),
         ],
       ),

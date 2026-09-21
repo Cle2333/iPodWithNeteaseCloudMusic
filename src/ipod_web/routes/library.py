@@ -253,7 +253,7 @@ def _classify(plan) -> dict[str, Any]:
     }
 
 
-def _build_import(ctx: WebContext, paths: list[str]):
+def _build_import(ctx: WebContext, paths: list[str], on_item=None):
     if not paths:
         raise HTTPException(status_code=400, detail="没有选择任何文件")
 
@@ -267,7 +267,7 @@ def _build_import(ctx: WebContext, paths: list[str]):
 
     device = ctx.device()
     library = ctx.library(force=True)
-    return device, library, build_import_plan(device, library, files)
+    return device, library, build_import_plan(device, library, files, on_item=on_item)
 
 
 @router.post("/import/preview")
@@ -298,9 +298,10 @@ def do_import(
 
 def _run_import(ctx: WebContext, handle, paths: list[str]) -> dict[str, Any]:
     handle.log(f"准备导入 {len(paths)} 个文件…")
-    _device, _library, plan = _build_import(ctx, paths)
+    handle.stage("读取本地文件", len(paths))
+    _device, _library, plan = _build_import(ctx, paths, on_item=handle.on_item)
 
-    handle.set_total(len(plan.to_add))
+    handle.stage("写入 iPod", len(plan.to_add))
     handle.log(
         f"待拷入 {len(plan.to_add)} 个"
         + (f"（其中 {sum(1 for i in plan.to_add if i.action == 'transcode')} 个需要转码）"
@@ -315,7 +316,12 @@ def _run_import(ctx: WebContext, handle, paths: list[str]) -> dict[str, Any]:
             f"设备只剩 {plan.device.free_text}"
         )
 
-    result = execute_import(plan, progress=handle.progress)
+    result = execute_import(
+        plan,
+        progress=handle.progress,
+        on_item=handle.on_item,
+        on_stage=handle.stage,
+    )
     ctx.invalidate_library()
 
     if result.failed:

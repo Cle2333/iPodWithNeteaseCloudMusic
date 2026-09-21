@@ -652,6 +652,7 @@ def sync_to_ipod(
     force: bool = False,
     progress: Callable[[str], None] | None = None,
     on_item: Callable[[int, int], None] | None = None,
+    on_stage: Callable[..., None] | None = None,
 ) -> IpodSyncOutcome:
     """把规划里的歌写进 iPod，并按歌单建好同名播放列表。
 
@@ -661,8 +662,16 @@ def sync_to_ipod(
     ``db_track_id``，而它在导入规划阶段就已经分配好了，所以没必要写两遍
     （多一遍就是多一个整库重写的风险窗口）。
 
-    ``on_item`` 会把**下载阶段**的逐首进度透传出去（写入阶段的进度走
-    ``progress`` 文本流）——界面在下载那一段需要进度条。
+    进度分两个通道，缺一不可：
+
+    * ``on_stage(名字, 总数)`` —— 换了**哪一段**、这一段要处理多少个。
+      同步要经过好几段，每段耗时差一个数量级（下载几十秒、转码几百秒、
+      写库几秒）。只报 done/total 的话，跨段时进度条会算错（比如拿
+      "下载了 3/3" 去比 "要写 147 个文件"）。
+    * ``on_item(done, total)`` —— **当前这一段**内的逐首进度。
+
+    ``on_stage`` 不传总数（``None``）表示这一段切不出等份（刷盘、写库），
+    界面应当显示不确定进度条。
     """
     def say(message: str) -> None:
         if progress:
@@ -677,6 +686,8 @@ def sync_to_ipod(
     ]
     if missing:
         say(f"本地还缺 {len(missing)} 首，先下载…")
+        if on_stage is not None:
+            on_stage("下载到本地", len(missing))
         download_plan = SyncPlan(source=plan.source, level=plan.level, items=missing)
         execute_downloads(
             client, store, download_plan, _cache_dir_of(store, plan),
@@ -693,8 +704,11 @@ def sync_to_ipod(
     from ipod_cli.importer import build_import_plan, execute_import
     from ipod_cli.transcode import transcode_for_import
 
+    if on_stage is not None:
+        on_stage("读取本地文件", len(files))
     import_plan = build_import_plan(
-        device, library, files, force=force, allow_transcode=True, progress=say
+        device, library, files, force=force, allow_transcode=True,
+        progress=say, on_item=on_item,
     )
 
     # 3. 算播放列表成员：本次要加的 + 已经在设备上的。
@@ -752,11 +766,17 @@ def sync_to_ipod(
 
     # 4. 真正写入
     if import_plan.to_add:
+        if on_stage is not None:
+            # ★ 这一段就是"看起来卡住"的那 6 分钟：转码 + 拷贝 + 刷盘 + 写库。
+            #   总数按要写入的曲目数给，界面才画得出进度条。
+            on_stage("写入 iPod", len(import_plan.to_add))
         result = execute_import(
             import_plan,
             progress=say,
             transcode=transcode_for_import,
             extra_playlists=extra_playlists or None,
+            on_item=on_item,
+            on_stage=on_stage,
         )
         outcome.added = result.added
         outcome.failed = list(result.failed)
@@ -772,6 +792,8 @@ def sync_to_ipod(
         # 于是会报一个假的"读回校验未通过"。实测踩到过。
         from ipod_cli.dbwrite import build_track_infos, write_library
 
+        if on_stage is not None:
+            on_stage("重建播放列表")
         infos, _ = build_track_infos(import_plan.existing_dicts, progress=say)
         if not infos:
             say("设备上没有可写入的曲目。")

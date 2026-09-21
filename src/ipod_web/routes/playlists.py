@@ -549,6 +549,7 @@ def _run_sync(
         library = ctx.library(force=True)
         handle.log(f"目标设备：{library.ipod_name or device.display_name}")
 
+    handle.stage("读取歌单", None)
     handle.log(f"正在读取「{source.name}」…")
     plan = plan_sync(
         client,
@@ -575,7 +576,13 @@ def _run_sync(
         )
 
     to_fetch = plan.needs_fetch
-    handle.set_total(len(to_fetch) if not push else len(plan.to_download))
+    # ★ 这里**不能**用 set_total：execute_downloads 一进门就报
+    #   on_item(0, 它自己的总数)，会把这里设的值覆盖掉。本地都已经下好的
+    #   情况下它的总数是 0 —— 于是进度条永远停在 0%，用户看到的就是"卡死"。
+    #   （实测就是这样：147 首要写，进度条 6 分钟不动。）
+    #   改用 stage：换段时归零重算，而且后面 sync_to_ipod 会为"写入 iPod"
+    #   那一段重新给总数。
+    handle.stage("下载到本地", len(to_fetch))
     handle.log(
         f"要处理 {len(plan.to_download)} 首"
         f"（本地还缺 {len(to_fetch)} 首需要下载）"
@@ -627,6 +634,7 @@ def _run_sync(
         make_playlist=True,
         progress=handle.progress,
         on_item=handle.on_item,
+        on_stage=handle.stage,
     )
 
     # 写过设备了，缓存必须失效——否则后面算"要删哪些"会拿着旧库去算，

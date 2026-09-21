@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from iopenpod.device import capabilities_for_family_gen
+from iopenpod.device import capabilities_for_family_gen, flush_filesystem
 from iopenpod.itunesdb_writer import TrackInfo
 from iopenpod.itunesdb_writer.mhit_writer import generate_db_track_id
 from iopenpod.sync import ipod_filetype_for_extension
@@ -33,7 +33,7 @@ from .dbwrite import (
     write_library,
 )
 from .discovery import IpodDevice, human_size
-from .library import LibraryData
+from .library import LibraryData, read_library
 from .mediafile import PcTrack, UnreadableMediaError, read_pc_track
 
 __all__ = [
@@ -197,8 +197,13 @@ def build_import_plan(
     force: bool = False,
     allow_transcode: bool = True,
     progress: ProgressCallback | None = None,
+    on_item: Callable[[int, int], None] | None = None,
 ) -> ImportPlan:
-    """生成导入计划，不触碰 iPod。"""
+    """生成导入计划，不触碰 iPod。
+
+    ``on_item(done, total)`` 报**读标签**的逐首进度。读标签要打开每个文件，
+    几百首也要几十秒——同样得让进度条动，不能只发文本。
+    """
     plan = ImportPlan(device=device, library=library, existing_dicts=library.track_dicts)
 
     existing_keys = {
@@ -218,6 +223,8 @@ def build_import_plan(
     for index, path in enumerate(files, start=1):
         if progress is not None:
             progress(f"正在读取标签 {index}/{len(files)}：{path.name}")
+        if on_item is not None:
+            on_item(index, len(files))
         try:
             pc = read_pc_track(path)
         except UnreadableMediaError as exc:
@@ -295,6 +302,8 @@ def execute_import(
     transcode: Callable[[PcTrack, Path], Path] | None = None,
     write_artwork: bool = True,
     extra_playlists: list | None = None,
+    on_item: Callable[[int, int], None] | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> ImportResult:
     """执行导入：拷文件 → 重写并签名数据库 → 读回校验。
 
@@ -344,7 +353,12 @@ def execute_import(
     for index, item in enumerate(plan.to_add, start=1):
         name = item.pc.display_name
         if progress is not None:
+            # ★ 这个循环同时含**转码**（无损档 FLAC→ALAC，一首 2-3 秒）和拷贝，
+            #   147 首实测 6 分钟——整条同步里最长的一段。以前这里只发文本、
+            #   不报 done/total，于是进度条整整 6 分钟停在原地，用户以为卡死。
             progress(f"正在复制 {index}/{total}：{name}")
+        if on_item is not None:
+            on_item(index, total)
         try:
             item.dest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -375,8 +389,129 @@ def execute_import(
             continue
         track_infos.append(_pc_to_track_info(item))
 
+    # ★ 写库失败时，把**本次刚拷进去的文件**撤掉。
+    #
+    # 为什么必须做：文件拷进 Music/ 之后，只有写库成功它才"存在"于 iPod。
+    # 写库失败（异常、或者进程被杀）而文件留着，这些文件在 iPod 上完全看不见，
+    # 但它们**占了空间**；更糟的是下次同步会重新分配文件名再拷一遍——
+    # 失败一次多一份，越试越乱。实测用户设备上就是这么堆到 295 个文件
+    # （数据库只认 1 首）的，白占了 4 GB。
+    copied_here: list[Path] = []
+    for item in plan.to_add:
+        if item.action != "error" and item.dest_path is not None:
+            copied_here.append(Path(item.dest_path))
+
+    # ── 1.5 把刚拷进去的文件**真的刷到设备**，再进入写库 ──────────────
+    #
+    # ★ 为什么必须在这里刷一次：
+    #
+    # 拷 4 GB 文件时，Windows 只把它们收进系统缓存就算"拷完了"，真正的写入
+    # 交给后台慢慢做。紧接着去写数据库（几千字节 + 几十 MB 封面）时，写库的
+    # I/O 要和这 4 GB 待刷数据抢同一条 USB 通道——实测表现是：**拷完文件之后
+    # 整个写库阶段卡住好几分钟，应用被 Windows 判定"未响应"然后被杀**，
+    # 数据库没写成，而文件已经留在设备上（看不见也删不掉，白占空间）。
+    #
+    # 在这里等一次，把"要花的时间"显式花掉，并且让用户看见进度条在动，
+    # 而不是让它在写库中途以谁也看不到的方式发作。
+    if copied_here:
+        size_mb = sum(
+            d.stat().st_size for d in copied_here if d.is_file()
+        ) / 1024 / 1024
+        if progress is not None:
+            progress(f"正在把 {size_mb:.0f} MB 刷到设备（别拔线）…")
+        if on_stage is not None:
+            # ★ 刷盘切不出等份（只能报"在这一段"），界面会显示**一直在动的**
+            #   不确定进度条。总比停在 100% 一动不动强——那看起来像死了，
+            #   而刷 4 GB 到 U 盘确实要好几分钟。
+            on_stage(f"把 {size_mb:.0f} MB 刷到设备（别拔线）")
+    try:
+        flush_ok, flush_msg = flush_filesystem(str(device.root))
+        if not flush_ok and progress is not None:
+            # 刷不动不算失败：后面写库时系统还会继续刷。只是提醒一句。
+            progress(f"提示：设备缓存没能立刻刷干净（{flush_msg}），继续。")
+    except Exception as exc:  # noqa: BLE001 - 刷不动不该让整次同步失败
+        if progress is not None:
+            progress(f"提示：刷设备缓存时出错（{type(exc).__name__}: {exc}），继续。")
+
+    def _rollback_copies(reason: str) -> None:
+        # ★ 删之前**必须确认数据库没引用这些文件**。
+        #
+        # 写库抛异常不等于"数据库没被改"——万一它已经落盘了（比如签名字那步
+        # 才失败），此时把文件删掉会在数据库里留下指向不存在文件的曲目，
+        # 那是比"多几个看不见的文件"严重得多的损坏。所以重新读一遍库来判定，
+        # 读不出来就**不删**（宁留垃圾，不冒险）。
+        try:
+            current = read_library(device.root)
+        except Exception:  # noqa: BLE001
+            if progress is not None:
+                progress(
+                    f"写库没成功（{reason}），但读不回数据库，"
+                    f"这次拷进去的文件先留着不动（不冒险删）。"
+                )
+            return
+
+        referenced = {
+            str(track.location).replace(":", "/").lstrip("/").casefold()
+            for track in current.tracks
+        }
+        root = Path(device.root)
+
+        removed = 0
+        for dest in copied_here:
+            try:
+                rel = str(dest.relative_to(root)).replace("\\", "/").casefold()
+            except ValueError:
+                continue
+            if rel in referenced:
+                continue          # 数据库认它了 —— 千万不能删
+            try:
+                if dest.is_file():
+                    dest.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        if removed and progress is not None:
+            progress(
+                f"写库没成功（{reason}），已把这次拷进去、数据库不认的 "
+                f"{removed} 个文件撤掉，避免它们在 iPod 上变成看不见的垃圾。"
+            )
+
     # ── 3. 整库重写 + 重建播放列表 + 签名 + 刷盘 + 读回校验 ──────────
-    write_result = write_library(
+    try:
+        write_result = _write_step(
+            device, plan, track_infos, progress, pc_file_paths, extra_playlists,
+            on_stage=on_stage,
+        )
+    except BaseException as exc:
+        # BaseException：用户点取消、或者进程正在被关掉时也要撤干净
+        _rollback_copies(f"{type(exc).__name__}")
+        raise
+
+    result.database_written = write_result.database_written
+    result.verified = write_result.verified
+    result.verification_note = write_result.verification_note
+    return result
+
+
+def _write_step(
+    device,
+    plan,
+    track_infos,
+    progress,
+    pc_file_paths,
+    extra_playlists,
+    on_stage=None,
+):
+    """真正的写库调用。单独拆出来，好让调用方用 try/except 包住。
+
+    **不要**在这里加别的逻辑——它的作用只是让 ``execute_import`` 能在
+    写库失败时把已经拷进去的文件撤掉。
+    """
+    if on_stage is not None:
+        # 写库是整库重写 + 重建播放列表 + 算签名，几秒到几十秒，切不出等份。
+        # 这一步以前完全不报，界面从"拷完了"直接跳到完成，中间一片空白。
+        on_stage("重建数据库并签名")
+    return write_library(
         device,
         plan.library,
         track_infos,
@@ -387,11 +522,6 @@ def execute_import(
         database_label="iTunesDB",
         extra_playlists=extra_playlists,
     )
-
-    result.database_written = write_result.database_written
-    result.verified = write_result.verified
-    result.verification_note = write_result.verification_note
-    return result
 
 
 def _pc_to_track_info(item: PlannedTrack) -> TrackInfo:

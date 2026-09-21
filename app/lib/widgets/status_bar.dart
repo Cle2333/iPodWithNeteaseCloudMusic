@@ -143,8 +143,12 @@ class _JobsChip extends StatelessWidget {
 
     final label = running == null
         ? '排队 ${queue.queued} 个'
-        : (running.total > 0
-              ? '${running.title} ${running.done}/${running.total}'
+        // ★ 带上**阶段名**：用户可能在别的页（歌单页、iPod 管理页）待着，
+        //   而同步最长的那一段要几分钟。状态条上只写标题的话，那几分钟里
+        //   他看到的是一动不动的"同步「xxx」"——这就是"以为卡住了"的来源。
+        //   写上"写入 iPod"之后，一眼就知道它走到哪一步了。
+        : (running.stage.isNotEmpty
+              ? '${running.title} · ${running.stage}'
               : running.title);
 
     return InkWell(

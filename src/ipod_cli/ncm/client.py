@@ -36,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ipod_cli.ncm.netutil import read_with_deadline
 from ipod_cli.ncm.state import Account
 
 #: 本地 api-enhanced 服务地址
@@ -160,7 +161,11 @@ def http_transport(url: str, timeout: int) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": "ipod-cli/0.1"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", "replace")
+            # ★ 本地 API 服务也可能卡住不返回（node 那边在等网易云）。
+            #   socket 超时管不住总时长，所以自己掐（见 netutil 的说明）。
+            body = read_with_deadline(response, seconds=60.0).decode(
+                "utf-8", "replace"
+            )
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:200]
         raise NcmError(f"接口返回 HTTP {exc.code}：{detail}") from exc
@@ -535,7 +540,10 @@ class NcmClient:
                 url, headers={"User-Agent": "ipod-cli/0.1"}
             )
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return response.read()
+                # ★ 同样要掐总时长（同 netutil 的说明）。封面拿不到不该
+                #   阻断整首歌，所以这里超时就返回空 —— 但**必须真的超时**，
+                #   不能永远等下去把整个同步拖死。
+                return read_with_deadline(response, seconds=60.0)
         except Exception:
             # 封面拿不到不该阻断整首歌的下载——没有封面照样能播
             return b""

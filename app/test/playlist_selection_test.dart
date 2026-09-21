@@ -172,6 +172,13 @@ ApiClient fakeApi(
   /// 以前它被并进"已同步"里直接置灰，用户想重下都选不中。
   int onIpodNoLocal = 0,
   bool deviceUnknown = false,
+
+  /// 这些歌**本地都已经下好了**，只差写进 iPod。
+  ///
+  /// ★ 这是"下载好之后再点同步"那条主路径的真实形状：要处理 N 首、需要下载
+  ///   0 首。以前的假后端永远返回 needs_fetch = 要处理数，于是测不出
+  ///   确认按钮把 "需要下载 0 首" 当成 "要同步 0 首" 来显示的那个 bug。
+  bool alreadyLocal = false,
   int pageSize = 50,
   List<int>? pendingIds,
 }) {
@@ -223,17 +230,23 @@ ApiClient fakeApi(
         final count = selected is List
             ? selected.length
             : (body['push'] == true ? total : total);
+        // ★ 本地都已经下好时：要处理 count 首，但**一首都不用下**。
+        //   这正是"下载好之后再点同步"那条主路径的真实形状，以前假后端
+        //   永远返回 needs_fetch = count，所以测不出按钮把它当"要同步几首"
+        //   显示的那个 bug。
+        final fetch = alreadyLocal ? 0 : count;
         data = <String, dynamic>{
           'loading': false,
           'playlist': '通勤歌单',
+          'target': body['push'] == true ? 'ipod' : 'local',
           'total': count,
           'to_download': count,
-          'needs_fetch': count,
+          'needs_fetch': fetch,
           'already_ready': 0,
           'unavailable': 0,
-          'estimated_mb': count * 7.0,
+          'estimated_mb': fetch * 7.0,
           'preview': <Map<String, String>>[
-            for (var i = 0; i < count && i < 10; i++)
+            for (var i = 0; i < fetch && i < 10; i++)
               {'name': '歌曲$i', 'artist': '歌手$i'},
           ],
         };
@@ -463,7 +476,7 @@ void main() {
 
       // 预览对话框：数字要跟选中的两首一致
       expect(find.textContaining('选中的 2 首'), findsWidgets);
-      expect(find.textContaining('需要下载'), findsOneWidget);
+      expect(find.textContaining('其中需要先下载'), findsOneWidget);
 
       await tester.tap(find.textContaining('开始下载'));
       await tester.pumpAndSettle();
@@ -808,6 +821,58 @@ void main() {
         findsOneWidget,
         reason: '不能报成"iPod：已有 0 / 缺 5"——那是我们不知道的事',
       );
+    });
+  });
+
+  group('★ 确认对话框的数字（下载好之后同步这条主路径）', () {
+    testWidgets('本地都下好了时，按钮显示「开始同步 N 首」而不是「0 首」', (tester) async {
+      final rec = Recorder();
+      await pumpPlaylists(tester, fakeApi(rec, alreadyLocal: true));
+
+      await tester.tap(find.text('歌曲1'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('歌曲2'));
+      await tester.pumpAndSettle();
+      await tapInActionBar(tester, '同步选中的 2 首');
+      await tester.pumpAndSettle();
+
+      // ★ 用户报的 bug：这里以前显示「开始同步 0 首」。
+      //   needsFetch 是"需要下载几首"，而本地都下好了它必然是 0；
+      //   结果按钮像在说"没东西可同步"，用户就不点了，同步作业从未提交。
+      expect(
+        find.text('开始同步 2 首'),
+        findsOneWidget,
+        reason: '按钮必须说"要同步几首"，不是"要下载几首"——后者在主路径上恒为 0',
+      );
+      expect(find.textContaining('开始同步 0 首'), findsNothing);
+
+      // 顺带：两个数字要分开说清楚
+      expect(find.textContaining('要同步'), findsWidgets);
+      expect(find.textContaining('本地已有（不用再下）'), findsOneWidget);
+
+      await tester.tap(find.text('开始同步 2 首'));
+      await tester.pumpAndSettle();
+
+      final body = rec.bodyFor('/download');
+      expect(body, isNotNull, reason: '确认之后必须真的提交作业');
+      expect(body!['push'], true);
+      expect(body['song_ids'], <int>[1001, 1002]);
+    });
+
+    testWidgets('需要先下载时会写明「其中需要先下载」', (tester) async {
+      final rec = Recorder();
+      await pumpPlaylists(tester, fakeApi(rec));   // alreadyLocal=false
+
+      await tester.tap(find.text('歌曲1'));
+      await tester.pumpAndSettle();
+      await tapInActionBar(tester, '下载选中的 1 首');
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('其中需要先下载'), findsOneWidget);
+      expect(find.text('开始下载 1 首'), findsOneWidget);
+
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
     });
   });
 }

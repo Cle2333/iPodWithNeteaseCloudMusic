@@ -19,8 +19,10 @@
 
 from __future__ import annotations
 
+import faulthandler
 import json
 import logging
+import tempfile
 import threading
 import time
 import uuid
@@ -97,6 +99,23 @@ class Job:
     started_at: float | None = None
     finished_at: float | None = None
 
+    #: 当前**阶段**的中文名（"下载到本地" / "写入 iPod" / "重建数据库" …）。
+    #:
+    #: 为什么单独搞一个字段：同步一次要经过好几段，每段耗时差一个数量级
+    #: （下载几十秒、转码几百秒、写库几秒）。只有 done/total 的话，用户在
+    #: 转码那 6 分钟里看到的就是"进度条不动"，以为卡死了——实测就是这么
+    #: 被投诉的。阶段名 + 进度条一起看，才知道"在动，且在干哪一步"。
+    stage: str = ""
+
+    #: 当前阶段是**什么时候开始的**。
+    #:
+    #: 为什么要单独记：速度/剩余时间是拿"已完成 / 已耗时"算的。用整个作业的
+    #: 耗时去算当前阶段的话，跨段之后数字会荒谬到没法看——实测同步 147 首时
+    #: 进到"写入 iPod"那一刻，作业已经跑了 40 秒、done 才 0，一旦 done=1 就会
+    #: 算出"还需 24 小时"。分段计时之后，剩余时间说的是"这一步还要多久"，
+    #: 那才是用户想知道的。
+    stage_started_at: float | None = None
+
     log: list[LogLine] = field(default_factory=list)
 
     #: 逐首歌的进度（只下载/同步类作业会有）。
@@ -112,6 +131,14 @@ class Job:
     #: 内部用：请求取消的标志
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _next_seq: int = 0
+
+    #: 最后一次**有推进**（记日志 / 报进度）的时刻。
+    #:
+    #: 卡死看门狗用它判断"这个作业是不是不动了"。以前没有这个字段，
+    #: 作业一旦卡住就只能看见"一直在跑"，查不出卡在哪——实测用户同步
+    #: 140 首时应用卡到未响应，事后翻遍日志只知道它停在那一步之前，
+    #: 具体停在哪一行完全没有线索。
+    last_progress_at: float = field(default_factory=time.time)
 
     # ── 给界面看的派生信息 ────────────────────────────────────────────
 
@@ -132,9 +159,20 @@ class Job:
         return max(end - start, 0.0)
 
     @property
+    def stage_elapsed(self) -> float:
+        """**当前阶段**已经跑了多久。
+
+        进度条上的速度和剩余时间都按它算，不按整个作业的耗时——
+        理由见 ``stage_started_at``。
+        """
+        start = self.stage_started_at or self.started_at or self.created_at
+        end = self.finished_at or time.time()
+        return max(end - start, 0.0)
+
+    @property
     def speed(self) -> float:
-        """每秒处理多少个。界面拿它算剩余时间。"""
-        elapsed = self.elapsed
+        """这一阶段每秒处理多少个。界面拿它算剩余时间。"""
+        elapsed = self.stage_elapsed
         if self.state != "running" or elapsed < 0.5 or self.done <= 0:
             return 0.0
         return self.done / elapsed
@@ -151,12 +189,25 @@ class Job:
 
     def add_log(self, text: str, level: str = "info") -> LogLine:
         line = LogLine(seq=self._next_seq, ts=time.time(), level=level, text=text)
+        # 任何一行日志都算"有推进"——卡死看门狗拿它当心跳（见 mark_progress）
+        self.mark_progress()
         self._next_seq += 1
         self.log.append(line)
         # 环形裁剪：长作业（几百首）会刷出巨量日志，不裁的话内存一直涨
         if len(self.log) > MAX_LOG_LINES:
             del self.log[: len(self.log) - MAX_LOG_LINES]
         return line
+
+    def mark_progress(self) -> None:
+        """记一次心跳。看门狗靠它区分"在干活"和"卡住了"。"""
+        self.last_progress_at = time.time()
+
+    @property
+    def stalled_for(self) -> float:
+        """已经多久没有推进了（秒）。仅在 running 时有意义。"""
+        if self.state != "running":
+            return 0.0
+        return max(time.time() - self.last_progress_at, 0.0)
 
     def logs_since(self, seq: int = 0, limit: int = 400) -> list[LogLine]:
         """取 ``seq`` 之后的日志行（不含 seq 本身）。
@@ -187,6 +238,8 @@ class Job:
             "total": self.total,
             "done": self.done,
             "current": self.current,
+            "stage": self.stage,
+            "stage_started_at": self.stage_started_at,
             "result": self.result,
             "items": [dict(item) for item in self.items],
             "log": [
@@ -217,6 +270,8 @@ class Job:
         job.total = int(data.get("total", 0))
         job.done = int(data.get("done", 0))
         job.current = str(data.get("current", ""))
+        job.stage = str(data.get("stage", ""))
+        job.stage_started_at = data.get("stage_started_at")
         job.result = dict(data.get("result") or {})
         job.items = [dict(i) for i in (data.get("items") or [])]
         job.log = [
@@ -246,6 +301,9 @@ class Job:
             "total": self.total,
             "done": self.done,
             "current": self.current,
+            # 阶段名（"写入 iPod" / "重建数据库并签名" …）。界面把它显示在
+            # 进度条上方——那 6 分钟里唯一能告诉用户"在动、在干哪一步"的东西。
+            "stage": self.stage,
             "percent": round(self.percent, 1),
             "error": self.error,
             "result": self.result,
@@ -301,12 +359,29 @@ class JobHandle:
     def warn(self, text: str) -> None:
         self._job.add_log(text, "warn")
 
+    def stage(self, text: str, total: int | None = None) -> None:
+        """换一个阶段，并把这一段的进度**归零重算**。
+
+        ``total`` 是这一段大约要处理多少个（首歌 / 个文件）。给 ``None`` 表示
+        这一段没法切成等份（刷盘、写库、校验）——界面会显示**不确定进度条**
+        （一直动的那个），而不是一根不动的空条。这一条是重点：用户抱怨
+        "以为卡住了"，正是因为以前这几段什么都不报。
+        """
+        self._job.stage = text
+        self._job.current = ""
+        self._job.done = 0
+        self._job.total = int(total) if total else 0
+        self._job.stage_started_at = time.time()
+        self._job.mark_progress()
+        self._job.add_log(text)
+
     def set_total(self, total: int) -> None:
         self._job.total = max(int(total), 0)
 
     def step(self, current: str = "") -> None:
         """完成一个。串行作业的最基本推进单位。"""
         self._job.done += 1
+        self._job.mark_progress()
         if current:
             self._job.current = current
 
@@ -333,6 +408,7 @@ class JobHandle:
         self.check_cancelled()
         self._job.total = max(int(total), 0)
         self._job.done = max(int(done), 0)
+        self._job.mark_progress()
 
     def on_song(self, event: Any) -> None:
         """逐首歌的进度。**直接传给 ``ncm`` 的 ``on_song``。**
@@ -376,6 +452,44 @@ class JobHandle:
 
     def finish(self, **result: Any) -> None:
         self._job.result.update(result)
+
+
+#: 作业多久没推进就认为"卡住了"，并把所有线程的调用栈打进日志（秒）。
+#:
+#: 为什么需要它：实测用户同步 140 首时，应用卡到 Windows 报"未响应"然后被杀。
+#: 事后能拿到的只有"某一步之后就没有日志了"——具体卡在哪一行**完全没有线索**，
+#: 因为 Python 卡在阻塞调用里时不会自己说话。有了这个看门狗，下次再卡住，
+#: 日志里会直接出现每个线程的调用栈，一眼就能看出卡在哪个函数。
+#:
+#: ★ 别设太小：实测一次成功的同步里，单次网络读取卡住 60 秒是**正常**的
+#: （网易云 CDN 忽快忽慢）。60 秒就报警会在正常同步里刷出"可能卡住了"，
+#: 用户看了以为坏了。180 秒足够区分"慢"和"真的不动了"。
+STALL_REPORT_SECONDS = 180.0
+
+#: 每次报栈之后隔多久才允许再报一次（避免日志被刷爆）
+STALL_REPORT_COOLDOWN = 300.0
+
+_log = logging.getLogger(__name__)
+
+
+def _dump_thread_stacks(reason: str) -> str:
+    """抓所有线程的调用栈，返回可读文本。
+
+    ``faulthandler`` 是标准库里唯一能在**不打断目标线程**的前提下拿到
+    "它现在到底停在哪一行"的手段——普通的 traceback 只能看崩溃，看不了卡住。
+    """
+    # ★ 必须写**真实文件**：faulthandler 要的是文件描述符，StringIO 没有
+    #   fileno()，会抛 UnsupportedOperation。实测踩到——第一次真卡住时
+    #   看门狗报了"作业卡住"却没能附上调用栈，白等了一轮。
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as fh:
+        try:
+            faulthandler.dump_traceback(file=fh, all_threads=True)
+            fh.flush()
+            fh.seek(0)
+            body = fh.read().strip()
+        except Exception as exc:  # noqa: BLE001 - 抓栈失败也不能把作业搞崩
+            return f"（抓调用栈失败：{type(exc).__name__}: {exc}）"
+    return f"{reason}\n{body}" if body else f"{reason}\n（没有可用信息）"
 
 
 class JobManager:
@@ -509,12 +623,55 @@ class JobManager:
             else:
                 return      # 全都是未完成的，不裁
 
+    def _start_stall_watchdog(self, job: Job) -> None:
+        """盯着这个作业；没推进超过阈值就把所有线程栈打进日志。
+
+        只报**一次**（之后按冷却时间），因为卡住时栈是同一份，刷屏没有意义。
+        """
+
+        def watch() -> None:
+            last_report = 0.0
+            while not job.is_finished:
+                time.sleep(5.0)
+                if job.is_finished:
+                    return
+                stalled = job.stalled_for
+                if stalled < STALL_REPORT_SECONDS:
+                    continue
+                now = time.time()
+                if now - last_report < STALL_REPORT_COOLDOWN:
+                    continue
+                last_report = now
+                report = _dump_thread_stacks(
+                    f"作业「{job.title}」已经 {stalled:.0f} 秒没有任何进展，"
+                    f"当前步骤：{job.current or '（未报告）'}"
+                )
+                # 进日志文件 + 界面调试面板：用户报障时把日志发出来就够了
+                _log.warning("作业卡住，附全部线程调用栈：\n%s", report)
+                job.add_log(
+                    f"⚠ 已经 {stalled:.0f} 秒没有任何进展（可能卡住了）。"
+                    f"所有线程的调用栈已写进日志文件，请把它发给开发者。",
+                    "warn",
+                )
+                # 同时塞进作业自己的日志尾部：界面能直接看到
+                for line in report.splitlines()[:40]:
+                    job.add_log(f"  {line}", "warn")
+
+        threading.Thread(
+            target=watch, name=f"stall-watchdog-{job.id}", daemon=True
+        ).start()
+
     def _run(self, job: Job, body: Callable[[JobHandle], Any]) -> None:
         handle = JobHandle(job)
         try:
             job.state = "running"
             job.started_at = time.time()
+            # 阶段起点也设上：没换过 stage 的作业（比如纯下载）靠它算速度，
+            # 不然 speed 拿不到起点会一直是 0，界面就不显示剩余时间了。
+            job.stage_started_at = job.started_at
+            job.last_progress_at = time.time()
             job.add_log("开始执行")
+            self._start_stall_watchdog(job)
             result = body(handle)
             if isinstance(result, dict):
                 job.result.update(result)

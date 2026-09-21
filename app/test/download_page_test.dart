@@ -42,6 +42,7 @@ Map<String, dynamic> job({
   int total = 0,
   int done = 0,
   String current = '',
+  String stage = '',
   double percent = 0,
   String error = '',
   int elapsed = 0,
@@ -59,6 +60,7 @@ Map<String, dynamic> job({
     'total': total,
     'done': done,
     'current': current,
+    'stage': stage,
     'percent': percent,
     'error': error,
     'result': <String, dynamic>{},
@@ -267,7 +269,7 @@ void main() {
   group('空闲', () {
     testWidgets('没下过东西给引导，而不是空白', (tester) async {
       await pumpDownload(tester, fakeApi());
-      expect(find.textContaining('还没有下载过东西'), findsOneWidget);
+      expect(find.textContaining('还没有跑过下载或同步'), findsOneWidget);
       expect(find.textContaining('歌单'), findsWidgets);
     });
 
@@ -286,7 +288,7 @@ void main() {
         ),
       );
       expect(
-        find.textContaining('还没有下载过东西'),
+        find.textContaining('还没有跑过下载或同步'),
         findsOneWidget,
         reason: '健康检查/环境自检混进下载页了',
       );
@@ -414,6 +416,160 @@ void main() {
         ),
       );
       expect(find.textContaining('前面还有 2 个任务在排队'), findsOneWidget);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // 阶段 + 进度条
+  //
+  // ★ 这一组守的是用户那条投诉：同步 147 首时"以为被卡住了"。
+  //   写入 iPod 那一段要转码 + 拷 3.3 GB，实测 6 分钟，而这段以前
+  //   一个进度数字都不报 —— 界面上整整 6 分钟什么都不动。
+  //   现在的判据：**只要还在干活，界面上就必须有东西在动。**
+  // ────────────────────────────────────────────────────────────────────
+
+  group('★ 阶段与进度条（"以为被卡住了"那条投诉）', () {
+    testWidgets('正在跑的时候显示阶段名', (tester) async {
+      await pumpDownload(
+        tester,
+        fakeApi(
+          jobs: <Map<String, dynamic>>[
+            job(
+              kind: 'sync',
+              title: '同步「喜欢的音乐」',
+              state: 'running',
+              stateText: '进行中',
+              stage: '写入 iPod',
+              total: 147,
+              done: 60,
+              percent: 40.8,
+              current: '阴天',
+            ),
+          ],
+        ),
+      );
+
+      expect(
+        find.text('写入 iPod'),
+        findsWidgets,
+        reason: '不知道在干什么，用户就只能猜自己是不是卡住了',
+      );
+    });
+
+    testWidgets('★ 写进 iPod 的那一段：进度条要跟着首歌走', (tester) async {
+      await pumpDownload(
+        tester,
+        fakeApi(
+          jobs: <Map<String, dynamic>>[
+            job(
+              kind: 'sync',
+              state: 'running',
+              stage: '写入 iPod',
+              total: 147,
+              done: 60,
+              percent: 40.8,
+              current: '阴天',
+            ),
+          ],
+        ),
+      );
+
+      expect(find.text('60 / 147'), findsOneWidget);
+      expect(find.text('41%'), findsOneWidget);
+
+      final bar = tester.widget<LinearProgressIndicator>(
+        find.byType(LinearProgressIndicator),
+      );
+      expect(
+        bar.value,
+        closeTo(0.408, 0.001),
+        reason: '有总数就该画确定进度条，并且值要跟着走',
+      );
+    });
+
+    testWidgets('★★ 切不出等份的阶段：画滚动的条，不画停着不动的空条', (tester) async {
+      // 刷盘 / 整库重写这种阶段没有"几分之几"，后端给的 total 是 0。
+      // 以前界面会画一根停在 0% 的条 —— 那看起来和死了没区别，
+      // 而这恰恰是最耗时的几步之一。
+      await pumpDownload(
+        tester,
+        fakeApi(
+          jobs: <Map<String, dynamic>>[
+            job(
+              kind: 'sync',
+              state: 'running',
+              stage: '把 3300 MB 刷到设备（别拔线）',
+              total: 0,
+              done: 0,
+              current: '',
+            ),
+          ],
+        ),
+      );
+
+      expect(find.textContaining('把 3300 MB 刷到设备'), findsWidgets);
+
+      final bar = tester.widget<LinearProgressIndicator>(
+        find.byType(LinearProgressIndicator),
+      );
+      expect(
+        bar.value,
+        isNull,
+        reason: 'value 为 null 才是"不确定进度条"（一直在滚）；'
+            '给个 0 就变成一根死条，用户看到的还是卡住',
+      );
+      expect(
+        find.textContaining('它在滚就说明没卡住'),
+        findsOneWidget,
+        reason: '得跟用户说清这根条为什么没有百分比',
+      );
+    });
+
+    testWidgets('跑的时候要显示已用时间', (tester) async {
+      await pumpDownload(
+        tester,
+        fakeApi(
+          jobs: <Map<String, dynamic>>[
+            job(
+              kind: 'sync',
+              state: 'running',
+              stage: '写入 iPod',
+              total: 147,
+              done: 10,
+              percent: 6.8,
+              elapsed: 200,
+            ),
+          ],
+        ),
+      );
+      expect(find.textContaining('已用 3 分 20 秒'), findsOneWidget);
+    });
+
+    testWidgets('★ 写入阶段的"正在处理"不该说成"正在下载"', (tester) async {
+      await pumpDownload(
+        tester,
+        fakeApi(
+          jobs: <Map<String, dynamic>>[
+            job(
+              kind: 'sync',
+              state: 'running',
+              stage: '写入 iPod',
+              total: 147,
+              done: 5,
+              percent: 3.4,
+              current: '年少有为',
+            ),
+          ],
+        ),
+      );
+      expect(find.textContaining('正在处理：年少有为'), findsOneWidget);
+      expect(find.textContaining('正在下载：年少有为'), findsNothing);
+    });
+
+    testWidgets('没插设备也没在跑：不编一个阶段出来', (tester) async {
+      await pumpDownload(tester, fakeApi(jobs: finishedJobs));
+      expect(find.text('写入 iPod'), findsNothing);
+      expect(find.textContaining('没有进度信息'), findsNothing);
     });
   });
 }

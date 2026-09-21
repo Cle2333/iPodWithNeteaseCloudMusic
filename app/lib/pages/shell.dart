@@ -28,7 +28,14 @@ class _ShellState extends State<Shell> {
           selected: Icons.queue_music,
           label: '歌单',
         ),
-        (icon: Icons.download_outlined, selected: Icons.download, label: '下载'),
+        // 「下载」改成「进度」：这页现在同时显示下载和同步的进度，
+        // 而且同步才是最长的那一段（转码 + 写入 iPod）。叫"下载"会让人
+        // 在同步卡住时根本想不到来这儿看。
+        (
+          icon: Icons.hourglass_bottom_outlined,
+          selected: Icons.hourglass_bottom,
+          label: '进度',
+        ),
         (
           icon: Icons.sd_storage_outlined,
           selected: Icons.sd_storage,

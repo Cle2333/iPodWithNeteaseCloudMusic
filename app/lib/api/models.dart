@@ -596,6 +596,7 @@ class JobInfo {
     required this.total,
     required this.done,
     required this.current,
+    required this.stage,
     required this.percent,
     required this.error,
     required this.message,
@@ -614,6 +615,14 @@ class JobInfo {
   final int total;
   final int done;
   final String current;
+
+  /// 当前**阶段**的中文名：「下载到本地」「写入 iPod」「重建数据库并签名」…
+  ///
+  /// 进度条只说明"这一段走了多少"，阶段名才说明"现在在干什么"。
+  /// 同步一次要过好几段、每段耗时差一个数量级（实测转码 6 分钟、拷贝 3 分钟、
+  /// 写库 6 秒），只给百分比的话用户根本不知道那 6 分钟花在哪。
+  final String stage;
+
   final double percent;
   final String error;
   final String message;
@@ -641,6 +650,16 @@ class JobInfo {
   /// 有逐首歌的记录可看。
   bool get hasItems => items.isNotEmpty;
 
+  /// 有没有可切分的计数——有总数才画得出百分比。
+  ///
+  /// ★ 没有总数**不是**"没进度"，而是"这一段切不出等份"（整库重写、刷盘、
+  /// 算签名）。界面这时要显示**不确定进度条**（一直在滚的那种），而不是一根
+  /// 停着不动的空条 —— 后者看起来就是卡死，正是用户投诉的观感。
+  bool get hasCounts => total > 0;
+
+  /// 进度卡最上面那行：优先阶段名，没有就退回状态文字。
+  String get stageLine => stage.isNotEmpty ? stage : (running ? stateText : '');
+
   /// 单首失败的原因（作业整体成功但个别歌失败时，错误在这一层）。
   List<JobItem> get failures =>
       items.where((i) => i.failed).toList(growable: false);
@@ -656,6 +675,7 @@ class JobInfo {
       total: _int(json['total']),
       done: _int(json['done']),
       current: _str(json['current']),
+      stage: _str(json['stage']),
       percent: _double(json['percent']),
       error: _str(json['error']),
       message: _str(result['message']),

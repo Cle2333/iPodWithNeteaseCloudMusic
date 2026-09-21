@@ -28,9 +28,18 @@ from pathlib import Path
 
 from ipod_cli.mediafile import probe_media_file
 from ipod_cli.ncm.client import NcmClient, Song, SongUrl
+from ipod_cli.ncm.netutil import ReadTimeoutError, read_with_deadline
 
 #: 这些档位给的是 FLAC；其余是 MP3
 LOSSLESS_LEVELS = frozenset({"lossless", "hires", "jymaster"})
+
+#: 下载一首歌的**总时长**上限（秒）。
+#:
+#: 为什么需要它：`urlopen(timeout=N)` 只是**每次 recv** 的超时。服务器只要
+#: 慢慢吐数据，每次 recv 都算没超时，于是永远不触发——实测同步就是这么卡死的
+#: （应用停在等响应上，界面跟着无响应）。所以自己掐墙钟。
+#: 50 MB 的无损在正常网速下也就几十秒，5 分钟已经很宽容。
+TRANSFER_DEADLINE_SECONDS = 300.0
 
 #: 单曲下载上限，防止接口返回离谱的 URL 把磁盘写满
 MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
@@ -114,25 +123,26 @@ def download_audio(url: str, timeout: int = 60) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "ipod-cli/0.1"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            chunks: list[bytes] = []
-            total = 0
-            while True:
-                chunk = response.read(1 << 16)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_DOWNLOAD_BYTES:
-                    raise DownloadError(
-                        f"文件超过 {MAX_DOWNLOAD_BYTES // 1048576} MB，已中止"
-                    )
-                chunks.append(chunk)
+            # ★ 必须自己掐总时长：`timeout` 只管单次 recv，服务器慢慢吐数据时
+            #   它永远不触发（实测就是这么卡死的——应用停在等响应上，
+            #   界面跟着无响应）。
+            try:
+                body = read_with_deadline(
+                    response,
+                    seconds=TRANSFER_DEADLINE_SECONDS,
+                    max_bytes=MAX_DOWNLOAD_BYTES,
+                )
+            except ValueError as exc:
+                raise DownloadError(str(exc)) from exc
+            except ReadTimeoutError as exc:
+                raise DownloadError(str(exc)) from exc
     except DownloadError:
         raise
     except Exception as exc:
         raise DownloadError(f"下载失败：{type(exc).__name__}: {exc}") from exc
-    if total == 0:
+    if not body:
         raise DownloadError("下载到 0 字节")
-    return b"".join(chunks)
+    return body
 
 
 def write_tags(path: Path, song: Song, cover: bytes = b"") -> bool:

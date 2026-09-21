@@ -829,3 +829,170 @@ class TestEntrypointWiring:
         assert ctx.cache_dir == want_cache
         assert ctx.store.path.parent.parent == data_dir, "状态库没落在数据目录下"
         ctx.shutdown()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 阶段（stage）：进度条跨段之后还得是对的
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestStage:
+    """★ 同步一次要经过好几段，每段耗时差一个数量级。
+
+    实测那一次：147 首、3.3 GB，总耗时 9 分半 —— 其中转码 6 分钟、拷文件 3 分钟、
+    写库 6 秒。每段用**自己的**总数算百分比，才不会出现"拿下载的 3/3 去比要写的
+    147 个文件"这种算不清的账。
+    """
+
+    def test_stage_resets_progress_and_takes_a_new_total(
+        self, manager: JobManager
+    ) -> None:
+        seen: dict = {}
+
+        def body(handle) -> dict:
+            handle.stage("下载到本地", 3)
+            handle.on_item(3, 3)
+            seen["after_download"] = (handle._job.done, handle._job.total)
+
+            handle.stage("写入 iPod", 147)
+            seen["after_stage"] = (
+                handle._job.stage, handle._job.done, handle._job.total
+            )
+            return {}
+
+        manager.submit("sync", "同步", body)
+        assert manager.wait_idle(20)
+
+        assert seen["after_download"] == (3, 3)
+        stage, done, total = seen["after_stage"]
+        assert stage == "写入 iPod"
+        assert done == 0, "换段没归零——进度条会从上一段的满格开始算"
+        assert total == 147
+
+    def test_stage_without_total_is_indeterminate(self, manager: JobManager) -> None:
+        """★ 不给总数 = 这一段切不出等份（刷盘、写库）。
+
+        界面据此显示**不确定进度条**（一直在动的那种）。这正是用户要的东西：
+        以前这几段什么都不报，条停着不动，看起来就是卡死。
+        断言 ``total == 0``（而不是随便给个假数），界面才能据此分辨两种条。
+        """
+        seen: dict = {}
+
+        def body(handle) -> dict:
+            handle.stage("把 3300 MB 刷到设备（别拔线）")
+            seen["total"] = handle._job.total
+            seen["stage"] = handle._job.stage
+            return {}
+
+        manager.submit("sync", "同步", body)
+        assert manager.wait_idle(20)
+
+        assert seen["total"] == 0, "不该造一个假的总数出来"
+        assert "刷" in seen["stage"]
+
+    def test_stage_counts_as_a_heartbeat(self, manager: JobManager) -> None:
+        """换段也算"有推进"——否则卡死看门狗会对着刚换的段误报。"""
+        seen: dict = {}
+
+        def body(handle) -> dict:
+            time.sleep(0.2)
+            before = handle._job.last_progress_at
+            handle.stage("写入 iPod", 10)
+            seen["moved"] = handle._job.last_progress_at > before
+            return {}
+
+        manager.submit("sync", "同步", body)
+        assert manager.wait_idle(20)
+        assert seen["moved"], "stage 没有刷新心跳"
+
+    def test_stage_shows_up_in_the_payload(self, manager: JobManager) -> None:
+        """阶段名要真的发到界面（不然白设）。"""
+
+        def body(handle) -> dict:
+            handle.stage("重建数据库并签名")
+            return {}
+
+        job = manager.submit("sync", "同步", body)
+        assert manager.wait_idle(20)
+        assert job.to_dict()["stage"] == "重建数据库并签名"
+
+    def test_stage_survives_a_restart(self, tmp_path: Path) -> None:
+        """落盘再读回来，阶段名还在——导出给开发者看时要有。"""
+        history = tmp_path / "logs" / "jobs.jsonl"
+        first = JobManager(history_path=history)
+        first.submit("sync", "同步", lambda h: h.stage("写入 iPod", 5) or {})
+        assert first.wait_idle(10)
+
+        restored = JobManager(history_path=history).list_jobs()[0]
+        assert restored.stage == "写入 iPod"
+
+    def test_progress_bar_actually_moves_across_stages(
+        self, manager: JobManager
+    ) -> None:
+        """★★ **用户那条投诉的回归测试。**
+
+        "本地已经全下好了，只差写进 iPod"——这时 ``execute_downloads`` 一进门
+        会报 ``on_item(0, 0)``（它自己的总数是 0）。以前路由层是先
+        ``set_total(147)``，随即被这个 0 覆盖掉，于是**整整 6 分钟进度条停在 0%**。
+
+        现在改成换段时重算，所以这条路径必须满足：
+        下载段（空）之后，写入段要有非零的百分比。
+        """
+        seen: dict = {}
+
+        def body(handle) -> dict:
+            handle.stage("下载到本地", 0)      # 本地都下好了
+            handle.on_item(0, 0)              # ← execute_downloads 的开场白
+            seen["during_download"] = handle._job.percent
+
+            handle.stage("写入 iPod", 147)     # ← sync_to_ipod 报的新段
+            for i in (1, 74, 147):
+                handle.on_item(i, 147)
+            seen["during_write"] = handle._job.percent
+            seen["final"] = handle._job.percent
+            return {}
+
+        manager.submit("sync", "同步", body)
+        assert manager.wait_idle(20)
+
+        assert seen["during_write"] > 0, (
+            "写入阶段百分比还是 0 —— 用户看到的就是一根死了 6 分钟的进度条"
+        )
+        assert seen["final"] == 100.0
+
+    def test_eta_is_per_stage_not_per_job(self, manager: JobManager) -> None:
+        """★★ 剩余时间要按**当前阶段**算，不能拿整个作业的耗时去算。
+
+        实测过的荒谬结果：同步 147 首时进到"写入 iPod"那一刻，作业已经跑了
+        40 秒、done 还是 0；一旦 done=1，拿整段耗时一算就是"还需 24 小时"。
+        用户看到的进度条会写着还要一天 —— 那比不显示更糟。
+
+        这里造的场景：第一段 1 秒处理 1 个（很慢），第二段立刻报出 1/100。
+        第二段的剩余时间应该只反映**这一段**的速度，而不是把第一段那 1 秒
+        也算进去（那会得到大约 99 秒；按旧算法会远超这个数）。
+        """
+        seen: dict = {}
+
+        def body(handle) -> dict:
+            handle.stage("读取本地文件", 1)
+            time.sleep(1.05)                  # 这一段的 1 秒不该算进下一段
+            handle.on_item(0, 1)
+
+            handle.stage("写入 iPod", 100)
+            handle.on_item(0, 100)
+            time.sleep(1.05)
+            handle.on_item(1, 100)
+            seen["eta"] = handle._job.eta_seconds
+            seen["speed"] = handle._job.speed
+            return {}
+
+        manager.submit("sync", "同步", body)
+        assert manager.wait_idle(30)
+
+        assert seen["speed"] is not None and seen["speed"] > 0, "速度还是 0"
+        # 这一段：1 个 / 约 1 秒 → 还剩 99 个 ≈ 99 秒。旧算法会把上一段的
+        # 1 秒也算进来，数字明显更小/更怪；这里给足余量但卡死上限。
+        assert seen["eta"] is not None
+        assert seen["eta"] < 300, (
+            f"剩余时间算成了 {seen['eta']:.0f} 秒——拿整个作业的耗时算的"
+        )
