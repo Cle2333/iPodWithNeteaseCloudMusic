@@ -71,6 +71,11 @@ class _LibraryPageState extends State<LibraryPage> {
   /// 顶部视图模式：false = 全部歌曲，true = 歌单。
   bool _playlistMode = false;
 
+  /// 修复对话框是否开着。开着时不响应全局刷新信号（见 [_onJobFinished]）。
+  bool _repairing = false;
+  /// 对话框开着期间错过的刷新信号。关掉后补一次（见 [_repair]）。
+  bool _missedRefresh = false;
+
   IpodPlaylistList? _playlists;
 
   /// 当前选中的歌单（`null` 表示还没选/设备上没有歌单）。
@@ -99,6 +104,13 @@ class _LibraryPageState extends State<LibraryPage> {
 
   void _onJobFinished() {
     if (!mounted) return;
+    // ★ 修复对话框开着的时候不刷：它的**扫描**作业也会 ping 这个信号，
+    // 而用户只是打开看一眼不该触发一次全量重读（几百首要读标签）。
+    // 记下来，等对话框关掉再补（见 _repair）。
+    if (_repairing) {
+      _missedRefresh = true;
+      return;
+    }
     unawaited(_load());
     // 歌单的写操作也走作业队列（新建/改名/删除/增删成员），
     // 完成后同样要重刷——不然界面上还是改动前的样子。
@@ -471,14 +483,22 @@ class _LibraryPageState extends State<LibraryPage> {
   /// 打开「数据库修复」：扫出数据库与磁盘对不上的地方，用户勾选后清理。
   ///
   /// 干净地收尾很重要：只有**真的动过手**才刷新列表，否则用户只是打开看一眼
-  /// 也会触发一次全量重读（几百首要读标签，白等）。
+  /// 也会触发一次全量重读（几百首要读标签，白等）。看门的那道闸就是
+  /// `_repairing`——它把全局的 `refreshSignal` 在对话框开着时挡掉，
+  /// 等关掉再按「是否动过手」决定刷不刷。
   Future<void> _repair() async {
+    _repairing = true;
+    _missedRefresh = false;
     final changed = await showRepairDialog(context, _api);
-    if (!mounted || !changed) return;
-    _toast('修复完成，正在重新读取设备…');
+    _repairing = false;
+    if (!mounted) return;
+    // 对话框开着的时候别的作业也可能完成了（同步 / 下载），那次没刷，这里补上；
+    // 修复本身动过手也要刷。两者都不成立 = 用户只是打开看了一眼，跳过。
+    if (!changed && !_missedRefresh) return;
+    _toast(changed ? '修复完成，正在重新读取设备…' : '设备状态已更新');
     await _load();
+    if (_playlistMode) await _loadPlaylists();
   }
-
 
   void _toast(String message, {bool error = false}) {
     if (!mounted) return;

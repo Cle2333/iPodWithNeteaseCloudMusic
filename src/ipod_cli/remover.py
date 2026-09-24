@@ -85,6 +85,9 @@ class RemoveResult:
     verified: bool = False
     verification_note: str = ""
     files_deleted: int = 0
+    #: 实际从磁盘删掉的字节数。**不等于 ``plan.bytes_freed``**——那个是数据库里
+    #: 记的大小，文件早就不在时它照样非零（设备修复清断链记录正是这个情形）。
+    bytes_deleted: int = 0
     file_errors: list[tuple[str, str]] = field(default_factory=list)
     playlists_rebuilt: dict[str, int] = field(default_factory=dict)
 
@@ -175,6 +178,12 @@ def execute_remove(
             progress(f"正在删除文件 {index}/{total}：{track.title or path.name}")
         try:
             if path.is_file():
+                # 字节数先量后删，量不到就当 0：**删不删只取决于文件在不在**，
+                # 统计失败不能把这次删除也带下去
+                try:
+                    result.bytes_deleted += path.stat().st_size
+                except OSError:
+                    pass
                 path.unlink()
                 result.files_deleted += 1
         except OSError as exc:

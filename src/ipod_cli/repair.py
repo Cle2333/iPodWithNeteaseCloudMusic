@@ -18,6 +18,9 @@
 | ``broken`` | 数据库认、文件不在 | 删记录（**整库重写**，风险高）|
 | ``stray_temp`` | 写入中断留下的临时文件 | 删文件（安全）|
 
+三类**互不重叠**：残留临时文件只算 ``stray_temp``，不再同时算孤儿——两边共用
+``_is_temp_name`` 一个判据，各写一份的话界面报出来的数字就是错的。
+
 ## 一条容易写错的地方
 
 路径比对**必须不分大小写**。iPod 用的是 FAT32，同一个文件在不同场合回显的
@@ -28,12 +31,14 @@
 
 from __future__ import annotations
 
+import fnmatch
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .discovery import IpodDevice, human_size
 from .library import LibraryData, Track, read_library
+from .mediafile import SUPPORTED_AUDIO_EXTENSIONS
 from .remover import prune_empty_music_dirs
 
 ProgressCallback = Callable[[str], None]
@@ -45,6 +50,18 @@ KERNEL_TEMP_GLOB = ".iop-*.tmp"
 #: iTunes / Artwork 目录下的临时文件。这些不是内核写的，是 iTunes 或别的
 #: 工具留下的写入暂存；同样没人清理。
 HOST_TEMP_SUFFIXES = (".tmp", ".partial")
+
+
+def _is_temp_name(name: str) -> bool:
+    """这个文件名算不算"没人管的临时文件"。
+
+    扫孤儿和扫临时文件**共用这一个判据**。各写一份的话，不带点前缀的
+    ``*.tmp`` / ``*.partial`` 会同时进两个清单：界面报"1 个孤儿文件 +
+    1 个残留临时文件"，用户以为有两个东西，孤儿占用的空间也被抬高。
+    """
+    if fnmatch.fnmatch(name, KERNEL_TEMP_GLOB):
+        return True
+    return name.lower().endswith(HOST_TEMP_SUFFIXES)
 
 
 class RepairError(RuntimeError):
@@ -101,10 +118,6 @@ class RepairScan:
     @property
     def broken_text(self) -> str:
         return human_size(self.broken_bytes)
-
-    @property
-    def temp_count(self) -> int:
-        return len(self.stray_temp)
 
     @property
     def is_clean(self) -> bool:
@@ -175,7 +188,16 @@ def scan_device(
     music = _music_root(device)
     if music.is_dir():
         for path in music.rglob("*"):
-            if not path.is_file() or path.name.startswith("."):
+            # 只认音频：Music/ 下的 desktop.ini / Thumbs.db 这类系统文件不是
+            # 同步残留，判成孤儿就等于把它们删掉（不可逆）。同步中断留下的
+            # 一定是音频（或下面单列的临时文件），白名单覆盖得到。
+            # 临时文件也不算孤儿：它们在 stray_temp 那一类里单独报。
+            if (
+                not path.is_file()
+                or path.name.startswith(".")
+                or _is_temp_name(path.name)
+                or path.suffix.lower() not in SUPPORTED_AUDIO_EXTENSIONS
+            ):
                 continue
             rel = path.relative_to(root).as_posix()
             try:
@@ -217,20 +239,17 @@ def scan_device(
 
 
 def _iter_temp_files(directory: Path):
-    """目录下所有"没人管的临时文件"。
+    """目录下所有"没人管的临时文件"（判据见 :func:`_is_temp_name`）。
 
     两来源：内核原子写入的 ``.iop-*.tmp``，以及 iTunes / 别的工具留下的
-    ``*.tmp``。**刻意不递归进 Music 的子目录之外**——只扫传入的那几个目录，
-    避免误删别的东西。
+    ``*.tmp`` / ``*.partial``。**会递归进子目录**——临时文件正是留在
+    ``Music/F00`` 这类目录里的；但只扫传进来的那几个根目录，不走别处。
     """
     try:
         for entry in directory.rglob("*"):
             if not entry.is_file():
                 continue
-            name = entry.name
-            if name.endswith(".tmp") and name.startswith(".iop-"):
-                yield entry
-            elif name.lower().endswith(HOST_TEMP_SUFFIXES):
+            if _is_temp_name(entry.name):
                 yield entry
     except OSError:
         return
@@ -348,19 +367,47 @@ def clean_broken_records(
     界面上也必须说清楚。复用删除曲目那条已经验证过的链路
     （``build_remove_plan`` → ``execute_remove``）：它先写库、后删文件，
     而且播放列表的幽灵条目由写入器自动丢弃。
+
+    覆盖全库时拒做（``RepairError``）——那说明设备那边读不到文件，
+    不是记录坏了；见下面 ``RemoveError`` 的翻译。
     """
-    from .remover import build_remove_plan, execute_remove  # noqa: PLC0415
+    from .remover import RemoveError, build_remove_plan, execute_remove  # noqa: PLC0415
 
     result = CleanResult(kind="broken")
     if not broken:
         result.note = "没有断链记录"
         return result
 
-    plan = build_remove_plan(device, library, list(broken))
+    try:
+        plan = build_remove_plan(device, library, list(broken))
+    except RemoveError as exc:
+        # 复用删除链路，它的最后一道闸是"不许把曲库清空"。在删除曲目的场景
+        # 那是防误点；在修复场景里撞上它，意味着**曲库已经全都断链了**——
+        # 设备那边一个文件都读不到（Music 没挂上、被外部清过、路径指向备份）。
+        # 这不是"用户想清空"，所以那句"想清空请用 Finder 恢复 iPod"答非所问，
+        # 换成这里的原因和下一步。
+        raise RepairError(
+            f"扫到的 {len(broken)} 条断链记录覆盖了库里的全部曲目，"
+            f"清掉就等于把曲库清空。\n"
+            f"\n"
+            f"这通常不是记录坏了，而是**设备那边读不到文件**：\n"
+            f"  · iPod_Control/Music 没挂上，或被外部清过\n"
+            f"  · 设备没插稳，或路径指向的是备份副本\n"
+            f"\n"
+            f"所以什么都没动（数据库未被修改）。先确认设备状态：\n"
+            f"在电脑上打开这个 iPod，看 iPod_Control/Music 下有没有文件，\n"
+            f"确认无误后重跑一次扫描。\n"
+            f"\n"
+            f"真要清空曲库，别用修复功能，走 Finder / iTunes 的「恢复 iPod」。"
+        ) from exc
+
     outcome = execute_remove(plan, progress=progress)
 
     result.removed = plan.count
-    result.bytes_freed = plan.bytes_freed
+    # ★ 释放量取**实际从磁盘删掉的字节**（``outcome.bytes_deleted``），不是
+    # ``plan.bytes_freed``。断链记录的定义就是"磁盘上没有文件"，所以这里正常
+    # 是 0；用 plan 的值会让界面报出"共释放 3.2 GB"，而磁盘可用空间一个字节没变。
+    result.bytes_freed = outcome.bytes_deleted
     if not outcome.verified:
         result.note = (
             f"已清掉 {plan.count} 条断链记录，但**读回校验未通过**："

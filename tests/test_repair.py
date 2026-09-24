@@ -217,6 +217,55 @@ class TestScan:
         assert names == [".iop-abc123.tmp", ".iop-def456.tmp", "iT.tmp"]
         assert len(scan.stray_temp) == 3
 
+    def test_temp_files_are_not_reported_as_orphans(self, ipod_ctx, ipod_root) -> None:
+        """★ 残留临时文件**只算一类**，不能既是孤儿又是临时文件。
+
+        不带点前缀的 ``*.tmp`` / ``*.partial`` 落在 ``Music/`` 里时两个清单都会
+        命中，界面于是报"1 个孤儿文件 + 1 个残留临时文件"，用户以为有两个东西，
+        孤儿占用的空间也被抬高。
+        """
+        from ipod_cli.repair import scan_device
+
+        drop_orphan(ipod_root, "leftover.tmp", size=1000)
+        drop_orphan(ipod_root, "song.partial", size=2000)
+        real = drop_orphan(ipod_root, "REAL.m4a", size=4000)  # 这个才是真孤儿
+
+        scan = scan_device(ipod_ctx.device())
+
+        assert [o.name for o in scan.orphans] == ["REAL.m4a"], (
+            f"临时文件混进孤儿清单了：{[o.name for o in scan.orphans]}"
+        )
+        assert sorted(Path(rel).name for rel in scan.stray_temp) == [
+            "leftover.tmp",
+            "song.partial",
+        ]
+        assert scan.orphan_bytes == 4000, "孤儿占用空间把临时文件也算进去了"
+        assert scan.disk_files == 1, f"磁盘文件数把临时文件也算进去了：{scan.disk_files}"
+        assert real.is_file()
+
+    def test_non_audio_files_are_not_orphans(self, ipod_ctx, ipod_root) -> None:
+        """★ Music/ 下的系统文件**不是孤儿**。
+
+        `desktop.ini` / `Thumbs.db` 是 Windows 自己放的，不是同步残留。
+        判成孤儿就会被 `clean_orphans` 不可逆删掉 —— 不该为清理音乐垃圾
+        顺手删掉用户的系统文件。
+        """
+        from ipod_cli.repair import scan_device
+
+        drop_orphan(ipod_root, "desktop.ini", size=128)
+        drop_orphan(ipod_root, "Thumbs.db", size=256)
+        drop_orphan(ipod_root, "notes.txt", size=64)
+        real = drop_orphan(ipod_root, "ORPH.m4a", size=4096)   # 这个才是真孤儿
+
+        scan = scan_device(ipod_ctx.device())
+
+        assert [o.name for o in scan.orphans] == ["ORPH.m4a"], (
+            f"非音频文件被当成孤儿了：{[o.name for o in scan.orphans]}"
+        )
+        assert scan.orphan_bytes == 4096, "孤儿字节数把非音频文件也算进去了"
+        assert scan.disk_files == 1, f"磁盘文件数把非音频文件也算进去了：{scan.disk_files}"
+        assert real.is_file()
+
 
 # ──────────────────────────────────────────────────────────────────────
 # 清理
@@ -359,6 +408,62 @@ class TestCleanBrokenRecords:
         assert result.removed == 0
         assert result.note == "没有断链记录"
 
+    @ffmpeg_required
+    def test_broken_cleanup_reports_no_freed_space(
+        self, ipod_ctx, ipod_root, music_dir
+    ) -> None:
+        """★ 清断链记录**不释放磁盘空间**，别把数据库里记的大小当成果报出去。
+
+        断链记录的定义就是"磁盘上没有文件"，所以实际释放是 0。用
+        ``plan.bytes_freed``（数据库记的大小）会让界面报"共释放 3.2 GB"，
+        而磁盘可用空间一个字节没变。
+        """
+        from ipod_cli.repair import clean_broken_records, scan_device
+
+        library = import_tracks(ipod_ctx, music_dir, 3)
+        victim = library.tracks[0]
+        rel = str(victim.location).strip(":").replace(":", "/")
+        (Path(ipod_root) / rel).unlink()
+        assert victim.size > 0, "这条用例的前提是记录里记着非零大小"
+
+        scan = scan_device(ipod_ctx.device())
+        result = clean_broken_records(ipod_ctx.device(), scan.library, scan.broken)
+
+        assert result.removed == 1
+        assert result.bytes_freed == 0, (
+            f"断链记录没有文件可删，却报了释放 {result.freed_text}"
+        )
+
+    @ffmpeg_required
+    def test_all_records_broken_is_refused_with_the_real_reason(
+        self, ipod_ctx, ipod_root, music_dir
+    ) -> None:
+        """★ 全都断链时拒做，而且要说清是**设备那边读不到文件**。
+
+        复用删除链路的"不许清空曲库"保护时，它给的是删除场景的话（"想清空请用
+        Finder 恢复 iPod"），在修复场景里答非所问。
+        """
+        from ipod_cli.library import read_library
+        from ipod_cli.repair import RepairError, clean_broken_records, scan_device
+
+        library = import_tracks(ipod_ctx, music_dir, 3)
+        for track in library.tracks:
+            rel = str(track.location).strip(":").replace(":", "/")
+            (Path(ipod_root) / rel).unlink()
+
+        scan = scan_device(ipod_ctx.device())
+        assert len(scan.broken) == len(scan.library.tracks) == 3
+
+        before = len(read_library(ipod_root).tracks)
+        with pytest.raises(RepairError) as caught:
+            clean_broken_records(ipod_ctx.device(), scan.library, scan.broken)
+
+        message = str(caught.value)
+        assert "把曲库清空" in message
+        assert "读不到文件" in message, f"没说清真实原因：{message}"
+        # ★ 拒绝的时候数据库必须原样——一条记录都不能少
+        assert len(read_library(ipod_root).tracks) == before == 3, "拒做之前动了数据库"
+
 
 # ──────────────────────────────────────────────────────────────────────
 # 接口
@@ -495,11 +600,15 @@ class TestRepairRoutes:
 
 
 class TestUnreadableDatabase:
-    """数据库读不出来时，报错要说人话。
+    """读不出来时，报错要说人话——而且是**对得上原因**的人话。
 
-    内核在这种情况下抛的是 ``InsufficientDataError`` 这类底层异常，
-    直接甩给用户等于没说。而"数据库读不出来"是个**需要用户动手**的状态
-    （设备可能真坏了），消息里得带上下一步该干什么。
+    内核在这种情况下抛的是 ``LibraryError`` 这类底层异常，直接甩给用户
+    等于没说。而"读不出来"是个**需要用户动手**的状态（设备可能真坏了），
+    消息里得带上下一步该干什么。
+
+    两条路必须分开：数据库损坏 → 用备份还原；读盘失败（没插稳 / 被占用 /
+    中途拔线）→ 确认挂载再试。把后者说成前者，会把用户推去动
+    ``iPod_Control`` 目录，而真实原因只是插头。
     """
 
     def test_scan_explains_an_unreadable_database(
@@ -515,3 +624,26 @@ class TestUnreadableDatabase:
         error = final.get("error", "")
         assert "读不出 iPod 的数据库" in error, f"没给人话：{error}"
         assert "备份恢复" in error, f"没给下一步怎么办：{error}"
+
+    def test_a_device_read_failure_is_not_called_a_corrupt_database(
+        self, ipod_ctx, ipod_client, monkeypatch
+    ) -> None:
+        """★ 读盘失败 **≠** 数据库损坏。
+
+        报成损坏会把用户推去用备份还原 ``iPod_Control``（动静大得多），
+        而真实原因往往只是没插稳、被 iTunes 占着，或者扫描途中被拔了。
+        """
+        import ipod_web.routes.repair as repair_routes
+
+        def boom(*args, **kwargs):
+            raise OSError("设备被占用了")
+
+        monkeypatch.setattr(repair_routes, "scan_device", boom)
+
+        job = ipod_client.post("/api/repair/scan").json()
+        final = wait_job(ipod_client, job["job_id"])
+
+        assert final["state"] == "failed"
+        error = final.get("error", "")
+        assert "读不到设备上的文件" in error, f"没给人话：{error}"
+        assert "数据库文件损坏" not in error, f"把读盘失败说成数据库损坏了：{error}"

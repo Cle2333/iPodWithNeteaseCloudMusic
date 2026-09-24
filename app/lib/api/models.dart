@@ -819,12 +819,6 @@ class RepairScan {
   final RepairGroup broken;
   final RepairGroup strayTemp;
 
-  /// 有没有可以清理的东西（孤儿 / 临时文件）。断链记录单独一档，不在这里。
-  bool get hasFixable => !orphans.isEmpty || !strayTemp.isEmpty;
-
-  /// 有没有任何问题（含断链记录）。
-  bool get hasProblems => !clean;
-
   factory RepairScan.fromJson(Map<String, dynamic> json) => RepairScan(
     dbTracks: _int(json['db_tracks']),
     diskFiles: _int(json['disk_files']),
@@ -843,6 +837,7 @@ class RepairCleanResult {
     required this.freedBytes,
     required this.freedText,
     required this.notes,
+    required this.errors,
   });
 
   final int cleaned;
@@ -852,17 +847,31 @@ class RepairCleanResult {
   /// 每一类各做了什么（中文，直接显示）。
   final List<String> notes;
 
-  factory RepairCleanResult.fromJson(Map<String, dynamic> json) =>
-      RepairCleanResult(
-        cleaned: _int(json['cleaned']),
-        freedBytes: _int(json['freed_bytes']),
-        freedText: _str(json['freed_text']),
-        notes: _list(json['kinds'])
-            .map(_map)
-            .map((k) => _str(k['note']))
-            .where((n) => n.isNotEmpty)
-            .toList(growable: false),
-      );
+  /// 各类别报错条数之和。> 0 = **有东西没做成**：删文件被占用/没权限，
+  /// 或者断链记录重写之后"读回校验未通过"。
+  ///
+  /// ★ 完成页不能因为有这个数还照旧给绿勾——尤其断链重写校验失败：
+  /// 数据库写下去了却没读回来，是最该让人看见的一种失败。
+  final int errors;
+
+  /// 有没有失败项。完成页据此换警示色，而不是一律"修复完成"。
+  bool get hasFailure => errors > 0;
+
+  factory RepairCleanResult.fromJson(Map<String, dynamic> json) {
+    final kinds = _list(json['kinds']).map(_map).toList(growable: false);
+    return RepairCleanResult(
+      cleaned: _int(json['cleaned']),
+      freedBytes: _int(json['freed_bytes']),
+      freedText: _str(json['freed_text']),
+      notes: kinds
+          .map((k) => _str(k['note']))
+          .where((n) => n.isNotEmpty)
+          .toList(growable: false),
+      errors: kinds
+          .map((k) => _int(k['errors']))
+          .fold<int>(0, (sum, n) => sum + n),
+    );
+  }
 }
 
 class JobsSnapshot {

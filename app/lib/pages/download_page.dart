@@ -167,11 +167,19 @@ class _TaskTabState extends State<_TaskTab> {
           // 只做"写入 iPod"，一首都不下载，于是 items 是空的。以前这里
           // 一律显示"还没开始下歌，稍等一下"，对一条**已经跑完**的同步说
           // 这句话，用户会以为它卡住了或者没干活。
+          //
+          // ★ `finished` 同时包含 done / failed / cancelled，所以文案必须
+          // 再按 `state == 'done'` 收窄：跟一条失败的同步说"直接写进了 iPod"
+          // 会和上面的「任务失败」自相矛盾。
+          //
+          // 另外别让用户"看上面的进度条"：sync 收尾那一步（重建数据库并签名）
+          // 不带总数，`stage()` 会把 total 归零，进度卡片那时显示的是
+          // 「没有进度信息」——根本没有进度条可看。
           Notice(
             icon: Icons.info_outline,
-            text: job.kind == 'sync'
+            text: job.kind == 'sync' && job.state == 'done'
                 ? '这次同步没有下载任何歌（歌都在本地了），直接写进了 iPod。\n'
-                  '逐首清单只在「下载」那一环产生；写入的进度看上面的进度条。'
+                  '逐首清单只在「下载」那一环产生；写入的情况看上面的任务卡片。'
                 : '这次任务没有逐首记录。\n失败的曲目会列在上面。',
             color: StatusColors.idle,
           )

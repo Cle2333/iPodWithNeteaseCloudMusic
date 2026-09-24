@@ -347,6 +347,13 @@ class ApiClient {
   /// 扫描设备。返回作业 id；结果在作业的 `result` 里（用 [job] 取）。
   Future<String> repairScan() async {
     final json = await _post('/api/repair/scan');
+    // 与 repairClean 保持一致：后端可能用「200 + ok:false」拒绝。
+    // 不校验的话，取不到 job_id 会静默返回空串，而调用方拿着空 jobId 的
+    // _watch 永远不轮询 —— 界面停在「正在扫描 iPod…」且不给任何提示，
+    // 只能靠「取消扫描」退出。
+    if (json['ok'] == false) {
+      throw ApiException(json['message']?.toString() ?? '扫描请求被拒绝');
+    }
     return json['job_id']?.toString() ?? '';
   }
 

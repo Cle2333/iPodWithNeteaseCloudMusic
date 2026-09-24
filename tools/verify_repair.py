@@ -122,12 +122,24 @@ def scan() -> dict:
 
 
 def disk_snapshot(ipod: Path) -> dict[str, int]:
-    """设备上所有音频文件的 相对路径 → 大小。用来核对"谁还在、谁没了"。"""
+    """设备上所有音频文件的 相对路径 → 大小。用来核对"谁还在、谁没了"。
+
+    **与扫描口径一致：只收音频扩展名。** 混进 `desktop.ini` / `Thumbs.db`
+    这类系统文件的话，"扫描到的磁盘文件数与实际一致"会平白报错 ——
+    扫描那边已经按音频过滤了（不是音频的东西根本不是同步残留）。
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from ipod_cli.mediafile import SUPPORTED_AUDIO_EXTENSIONS
+
     out: dict[str, int] = {}
     music = ipod / "iPod_Control" / "Music"
     if music.is_dir():
         for p in music.rglob("*"):
-            if p.is_file() and not p.name.startswith("."):
+            if (
+                p.is_file()
+                and not p.name.startswith(".")
+                and p.suffix.lower() in SUPPORTED_AUDIO_EXTENSIONS
+            ):
                 out[p.relative_to(ipod).as_posix()] = p.stat().st_size
     return out
 
@@ -137,6 +149,38 @@ def db_track_count(ipod: Path) -> int:
     from ipod_cli.library import read_library
 
     return len(read_library(ipod).tracks)
+
+
+def norm_rel(rel: str) -> str:
+    """相对路径归一化，口径与 `ipod_cli.repair._norm_rel` 完全一致。
+
+    折叠大小写 + 统一成正斜杠。核对"该活的还活着"必须用删除逻辑同一个形状，
+    否则会被 FAT32 的大小写差异骗过去（真机上路径大小写是混着来的）。
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from ipod_cli.repair import _norm_rel
+
+    return _norm_rel(rel)
+
+
+def db_referenced_files(ipod: Path) -> set[str]:
+    """数据库引用的文件在设备上的相对路径（归一化后）。
+
+    "该活的还活着"要用它判，别用"该删的确实没了"——后者受两件事干扰：
+    接口的 items 被 `PREVIEW_ITEMS` 截断（超过 20 个就必然对不上），
+    而临时文件也会被同一次清理删掉。数据库引用的文件是**确定不能动**的，
+    按它判才是干净的判据。
+
+    归一化口径与 `ipod_cli.repair._norm_rel` 一致（折叠大小写 + 正斜杠）：
+    那是删除逻辑的判据，核对时必须用同一个形状，否则会被大小写差异骗过去。
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from ipod_cli.library import read_library
+    from ipod_cli.repair import _norm_rel
+
+    return {
+        _norm_rel(str(t.location)) for t in read_library(ipod).tracks if t.location
+    }
 
 
 def main() -> int:
@@ -156,7 +200,10 @@ def main() -> int:
 
     env = dict(os.environ)
     env["IPOD_MANAGER_IPOD"] = str(ipod)
-    env.setdefault("IPOD_MANAGER_PORT", str(PORT))
+    # ★ 覆盖写，不用 setdefault：api() 里请求的是硬编码的 PORT，这里若允许
+    # 外部环境变量改端口，会出现「exe 监听 9000、脚本去问 8765」，
+    # 报的是"后端没起来"，排查方向直接被带偏。
+    env["IPOD_MANAGER_PORT"] = str(PORT)
 
     print(f"══ 起发行版 ══  {exe.name}")
     print(f"   目标设备：{ipod}")
@@ -219,12 +266,20 @@ def main() -> int:
             for rel in sorted(orphan_names):
                 check(f"孤儿已删：{Path(rel).name}", rel not in snap_after)
 
-            # ★★ 最重要的一条：数据库引用的文件一个不能少
-            # 用清理前的快照减去被清掉的那些，剩下的都必须还在
-            gone = set(snap_before) - set(snap_after)
-            check("删掉的全是孤儿/临时文件，没有误删",
-                  gone <= orphan_names,
-                  f"多删了：{sorted(gone - orphan_names)[:5]}")
+            # ★★ 最重要的一条：数据库引用的文件一个都不能少。
+            #
+            # 判据用「该活的还活着」，不用「该删的确实没了」——后者有两个坑：
+            #  · 报出来的 items 被接口截断（PREVIEW_ITEMS=20），孤儿超过 20 个
+            #    时 gone 必然大于样例集合，于是"没有误删"变成假失败
+            #  · 这次请求同时勾了 stray_temp，临时文件本来就该消失，也得算进
+            #    "允许消失"的集合里
+            # 数据库引用的文件是确定不能动的，直接按它判才顶得住截断。
+            gone = {norm_rel(rel) for rel in snap_before} - {
+                norm_rel(rel) for rel in snap_after
+            }
+            missing = db_referenced_files(ipod) & gone
+            check("数据库引用的文件一个都没少（没有误删）", not missing,
+                  f"被误删：{sorted(missing)[:5]}")
             check("数据库曲目数没被清理改动",
                   db_track_count(ipod) == db_before,
                   f"{db_before} → {db_track_count(ipod)}")
@@ -263,7 +318,10 @@ def main() -> int:
             check("曲目数减少量 = 清掉的条数",
                   db_now - after_db == broken_count,
                   f"{db_now} → {after_db}，期望少 {broken_count}")
-            check("清完之后数据库还能读（没写坏）", after_db >= 0)
+            # 这里以前还有一条 `after_db >= 0` —— 永远为真（len() 不可能返回
+            # 负数），起不到"确认数据库没被写坏"的作用。真正能发现写坏的是上面
+            # 那句 db_track_count：它内部 read_library 一旦读不出来就会抛异常，
+            # 重写失败则曲目数对不上。空断言已删。
 
             final_scan = scan()
             check("清完之后没有断链记录了",

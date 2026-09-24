@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from ipod_cli.library import LibraryError
 from ipod_cli.repair import (
     CleanResult,
     clean_broken_records,
@@ -64,21 +65,31 @@ def scan(ctx: WebContext = Depends(get_ctx)) -> dict[str, Any]:
 
 
 def _read_device(ctx: WebContext, handle, *, action: str):
-    """取设备并扫描。数据库读不出来时给一句**能照着做**的中文说明。
+    """取设备并扫描。读不出来时给一句**能照着做**的中文说明。
 
-    内核在这种情况下抛的是 ``InsufficientDataError`` 这类底层异常，
-    直接甩给用户等于没说。而"数据库读不出来"是个需要用户动手的状态
-    （设备可能真的坏了），必须说清下一步干什么。
+    内核在这种情况下抛的是 ``LibraryError`` 这类底层异常，直接甩给用户
+    等于没说。而"数据库读不出来"是个需要用户动手的状态（设备可能真的坏了），
+    必须说清下一步干什么。
+
+    ★ ``OSError`` 走**单独一路**：读盘失败**不是**数据库损坏。按损坏去说会把
+    用户推去用备份还原 ``iPod_Control``——动静大得多，而真实原因往往只是没插稳、
+    被 iTunes 占着，或者扫描途中被拔了。
     """
     device = ctx.device()
     handle.log(f"正在{action} {device.display_name}…")
     try:
         return device, scan_device(device, progress=handle.progress)
-    except Exception as exc:  # noqa: BLE001 - 统一翻译成中文提示
+    except LibraryError as exc:
         raise RuntimeError(
             f"读不出 iPod 的数据库，没法比对当前状态（{type(exc).__name__}）。\n"
             f"  这通常意味着数据库文件损坏。先在电脑上用 iTunes / Finder 看一眼\n"
             f"  这个 iPod 是否正常，必要时用备份恢复 iPod_Control 目录，再回来重试。"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"{action}时读不到设备上的文件（{type(exc).__name__}：{exc}）。\n"
+            f"  数据库没有被改动。常见原因是 iPod 没插稳、被别的程序（如 iTunes）\n"
+            f"  占着，或者扫描途中被拔掉了。确认设备正常挂载后再试一次。"
         ) from exc
 
 
@@ -96,7 +107,7 @@ def _run_scan(ctx: WebContext, handle) -> dict[str, Any]:
         handle.log(
             f"断链记录 {len(scan.broken)} 首——数据库里有，磁盘上没文件，"
             f"iPod 上显示得出来但播不了",
-            level="error" if len(scan.broken) else "warn",
+            level="error",
         )
     if scan.stray_temp:
         handle.log(f"残留临时文件 {len(scan.stray_temp)} 个", level="warn")

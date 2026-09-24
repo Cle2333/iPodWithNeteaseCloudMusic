@@ -42,6 +42,15 @@ TRANSCODE_AUDIO_EXTENSIONS = {
     ".wavpack": "wv",
 }
 
+#: 所有可能出现在设备上的音频扩展名（原生 + 需转码）。
+#:
+#: 设备侧判断"这个文件是不是音频"用它。**唯一用处是"别把非音频文件当音乐"**：
+#: 修复功能扫孤儿时，Music/ 下的 desktop.ini / Thumbs.db 这类系统文件不是同步
+#: 残留，按音频扩展名过滤掉它们才不会被当成孤儿删掉。
+SUPPORTED_AUDIO_EXTENSIONS = frozenset(NATIVE_AUDIO_EXTENSIONS) | frozenset(
+    TRANSCODE_AUDIO_EXTENSIONS
+)
+
 # 常见的专辑封面文件（没有内嵌封面时去找）
 COVER_FILENAMES = (
     "cover.jpg", "cover.jpeg", "cover.png",
@@ -352,12 +361,13 @@ def collect_audio_files(source: Path, recursive: bool = True) -> list[Path]:
     if not source.is_dir():
         raise UnreadableMediaError(f"路径既不是文件也不是目录：{source}")
 
-    supported = set(NATIVE_AUDIO_EXTENSIONS) | set(TRANSCODE_AUDIO_EXTENSIONS)
     iterator = source.rglob("*") if recursive else source.glob("*")
     files = [
         entry
         for entry in iterator
-        if entry.is_file() and entry.suffix.lower() in supported and not _is_hidden(entry)
+        if entry.is_file()
+        and entry.suffix.lower() in SUPPORTED_AUDIO_EXTENSIONS
+        and not _is_hidden(entry)
     ]
     return sorted(files, key=lambda p: str(p).lower())
 

@@ -98,7 +98,12 @@ Map<String, dynamic> cleanScan() => <String, dynamic>{
 };
 
 /// 一次清理的结果。
-Map<String, dynamic> cleanResult({int cleaned = 3, int freed = 162900000}) =>
+Map<String, dynamic> cleanResult({
+  int cleaned = 3,
+  int freed = 162900000,
+  /// 放进第一类（孤儿）的报错条数。> 0 = 部分失败，完成页必须换警示色。
+  int errors = 0,
+}) =>
     <String, dynamic>{
       'cleaned': cleaned,
       'freed_bytes': freed,
@@ -108,8 +113,8 @@ Map<String, dynamic> cleanResult({int cleaned = 3, int freed = 162900000}) =>
           'kind': 'orphans',
           'removed': 2,
           'bytes': 162000000,
-          'note': '已删除 2 个孤儿文件，释放 154.5 MB',
-          'errors': 0,
+          'note': errors > 0 ? '已删除 2 个孤儿文件（$errors 个删不掉）' : '已删除 2 个孤儿文件，释放 154.5 MB',
+          'errors': errors,
         },
         <String, dynamic>{
           'kind': 'stray_temp',
@@ -514,6 +519,44 @@ void main() {
       await settle(tester);
 
       expect(result, isFalse, reason: '一项都没清到，刷新是白费');
+    });
+
+    testWidgets('★ 清理有失败项 → 不能给绿勾说「修复完成」', (tester) async {
+      // 后端每类都回 errors（删文件被占用/没权限），断链那条还可能是
+      // "重写后读回校验未通过"——最该被看见的失败，不能藏在绿勾底下。
+      await openDialog(tester, fakeApi(cleanJobResult: cleanResult(errors: 2)));
+      await tester.tap(find.text('开始修复'));
+      await settle(tester);
+
+      expect(find.text('修复完成，但有东西没做成'), findsOneWidget);
+      expect(
+        find.text('修复完成'),
+        findsNothing,
+        reason: '有失败项还报「修复完成」，用户会以为都清干净了',
+      );
+    });
+
+    testWidgets('没有失败项时仍然是「修复完成」', (tester) async {
+      await openDialog(tester, fakeApi());
+      await tester.tap(find.text('开始修复'));
+      await settle(tester);
+
+      expect(find.text('修复完成'), findsOneWidget);
+    });
+  });
+
+  group('文案', () {
+    testWidgets('★ 界面上不出现 Markdown 星号', (tester) async {
+      // 强调留在源码里（读代码看得见重点），但 Text 不渲染 Markdown，
+      // 不过一道去标记就会被用户看到「勾选的会被清掉，**不能撤销**」。
+      await openDialog(tester, fakeApi());
+
+      expect(
+        find.textContaining('**'),
+        findsNothing,
+        reason: '星号漏到界面上了 —— 每处显示前都要过 _plain()',
+      );
+      expect(find.textContaining('不能撤销'), findsOneWidget);
     });
   });
 
